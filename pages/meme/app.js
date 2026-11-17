@@ -82,9 +82,31 @@ async function loadState({ append = false } = {}) {
     el("statAuto").textContent = auto.enabled
       ? `${auto.groups || 0} 群 · ${pcts.low ?? 10}/${pcts.mid ?? 25}/${pcts.high ?? 50}%`
       : "已关（总开关）";
-    el("statAuto").title =
-      `每小时概率：低 ${pcts.low ?? 10}% / 中 ${pcts.mid ?? 25}% / 高 ${pcts.high ?? 50}%` +
-      `；每群每天上限 ${auto.maxPerDay || "不限"}；免打扰 ${auto.quiet || "不设"}`;
+    // 悬停能看到**是哪几个群**订阅了、什么档、今天发了几条 —— 只看一个数字
+    // 查不出「为什么这个群不推」（比如它其实被自动关掉了）。
+    const subs = Array.isArray(auto.subscribed) ? auto.subscribed : [];
+    const offed = Array.isArray(auto.offed) ? auto.offed : [];
+    const lines = [
+      `每小时概率：低 ${pcts.low ?? 10}% / 中 ${pcts.mid ?? 25}% / 高 ${pcts.high ?? 50}%`,
+      `每群每天上限 ${auto.maxPerDay || "不限"}；免打扰 ${auto.quiet || "不设"}`,
+    ];
+    if (subs.length) {
+      lines.push("已订阅的群：");
+      subs.forEach((s) => {
+        const level = { low: "低", mid: "中", high: "高" }[s.level] || s.level || "?";
+        const blocked = s.blockedUntil * 1000 > Date.now() ? "（冷却中）" : "";
+        lines.push(`· ${s.group}：${level} ${s.pct}%/小时，今天 ${s.sentToday} 条${blocked}`);
+      });
+    } else {
+      lines.push("还没有群订阅自动推送。");
+    }
+    if (offed.length) {
+      lines.push(`被自动关掉的群 ${offed.length} 个（没权限/已不在群里）：`);
+      offed.forEach((s) => {
+        lines.push(`· ${String(s.umo).slice(-8)}：${s.reason === "gone" ? "机器人不在群里" : "群没开主动消息"}`);
+      });
+    }
+    el("statAuto").title = lines.join("\n");
   }
   el("statMode").textContent = payload.running?.captionMode || "—";
   el("statProvider").textContent = payload.running?.moderationProvider || "未配";

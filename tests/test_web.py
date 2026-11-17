@@ -489,3 +489,22 @@ def test_card_probe_route_registered(env):
     routes = [route for route, *_ in env["context"].route_table]
     assert "/astrbot_plugin_meme/ui/card_probe" in routes
     assert "/astrbot_plugin_meme/ui/fetch_url" in routes
+
+
+def test_web_state_lists_subscribed_groups(env):
+    """页面上要能看出「是哪几个群订阅了、什么档、今天发了几条」，
+    不然只给一个数字，出问题时无从查起。"""
+    import asyncio
+
+    instance = env["plugin"]
+    for group in ("G1", "G2"):
+        umo = f"qq_official:GroupMessage:{group}"
+        instance.store.touch_group(umo, group)
+        instance.store.set_auto_level(umo, "high" if group == "G1" else "low")
+
+    state = asyncio.run(instance.web_state())
+    auto = state["auto"]
+    assert auto["groups"] == 2
+    subs = {row["umu"].rsplit(":", 1)[-1]: row for row in auto["subscribed"]}
+    assert subs["G1"]["level"] == "high" and subs["G1"]["pct"] == 50
+    assert subs["G2"]["level"] == "low" and subs["G2"]["pct"] == 10

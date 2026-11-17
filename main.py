@@ -178,7 +178,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.5.0",
+    "0.6.0",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -1952,12 +1952,32 @@ class MemePlugin(Star):
         page["blacklist"] = await asyncio.to_thread(self.store.list_blacklist, 20)
         auto_state = await asyncio.to_thread(self.store.group_state, "") or {}
         auto_offed = await asyncio.to_thread(self.store.auto_offed_groups, 20)
+        auto_rows = await asyncio.to_thread(self.store.auto_groups)
+        today = _now_day_key(time.time())
         page["auto"] = {
             "enabled": self._auto_enabled(),
             "pcts": self._auto_pcts(),
             "maxPerDay": self._cfg_int("auto_push_max_per_day", AUTO_MAX_PER_DAY_DEFAULT),
             "quiet": str(self.cfg.get("auto_push_quiet", AUTO_QUIET_DEFAULT) or ""),
-            "groups": len(await asyncio.to_thread(self.store.auto_groups)),
+            "groups": len(auto_rows),
+            # 哪个群订阅了什么档、今天发了几条：只看一个数字查不出问题出在哪个群
+            "subscribed": [
+                {
+                    "group": str(row.get("group_id") or row.get("umo") or "")[-8:],
+                    "umu": str(row.get("umo") or ""),
+                    "level": str(row.get("auto_level") or ""),
+                    "pct": self._auto_pct(str(row.get("auto_level") or "")),
+                    "since": float(row.get("auto_since") or 0),
+                    "lastPush": float(row.get("last_push") or 0),
+                    "sentToday": (
+                        int(row.get("auto_sent_count") or 0)
+                        if str(row.get("auto_sent_date") or "") == today
+                        else 0
+                    ),
+                    "blockedUntil": float(row.get("blocked_until") or 0),
+                }
+                for row in auto_rows
+            ],
             "bootstrap": bool(self.cfg.get("auto_push_bootstrap", True)),
             # 被自动关掉的群：页面上要能看见，否则「订阅自己消失了」没人知道为什么
             "offed": [
