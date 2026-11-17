@@ -356,6 +356,14 @@ class MemeStore:
             (1 if enabled else 0, slots or "", umo),
         )
 
+    def recent_group_umos(self, limit: int = 5) -> list[str]:
+        """最近说过话的群（有 umo 的那些）。卡片自检需要一个真群来拿 client。"""
+        rows = self._rows(
+            "SELECT umo FROM groups WHERE umo != '' ORDER BY last_push DESC, umo LIMIT ?",
+            (int(limit),),
+        )
+        return [row["umo"] for row in rows]
+
     def daily_groups(self) -> list[dict]:
         rows = self._rows("SELECT * FROM groups WHERE daily_enabled = 1")
         return [dict(row) for row in rows]

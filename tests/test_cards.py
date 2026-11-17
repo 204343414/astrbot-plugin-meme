@@ -256,11 +256,14 @@ def test_card_probe_reports_material_ok_and_cleans_up(plugin):
     instance, _context = plugin
     hub = FakeHub()
     instance._hub = hub
+    # 素材库上传要先知道用哪个群的 client，所以得有个"说过话的群"
+    instance.store.touch_group("qq_official:GroupMessage:G1", "G1")
 
     import asyncio
 
     report = asyncio.run(instance.web_card_probe())
     assert report["ok"] is True
+    assert report["via"] == "素材库"
     assert report["checks"][0]["name"] == "素材库"
     # 只上传不发送，验证完当场回收，群里不会多出消息
     assert hub.cards == []
@@ -270,17 +273,20 @@ def test_card_probe_reports_material_ok_and_cleans_up(plugin):
 def test_card_probe_falls_back_to_image_host(plugin):
     instance, _context = plugin
     instance._hub = FakeHub(material_ok=False, host_ok=True)
+    instance.store.touch_group("qq_official:GroupMessage:G1", "G1")
 
     import asyncio
 
     report = asyncio.run(instance.web_card_probe())
     assert report["ok"] is True
+    assert report["via"] == "图床"
     assert [check["name"] for check in report["checks"]] == ["素材库", "图床"]
 
 
 def test_card_probe_explains_failure(plugin):
     instance, _context = plugin
     instance._hub = FakeHub(material_ok=False, host_ok=False)
+    instance.store.touch_group("qq_official:GroupMessage:G1", "G1")
 
     import asyncio
 
