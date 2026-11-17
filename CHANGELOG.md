@@ -1,5 +1,24 @@
 # 更新记录
 
+## 0.2.2
+
+- 修「点删除没反应」：面板给插件页面的 iframe 是
+  `sandbox="allow-scripts allow-forms allow-downloads"`，**没有 allow-modals**，
+  所以 `window.confirm` 静默返回 false，删除确认永远点是「取消」。改成页面内
+  自己的确认框。
+- 修「拖图进去没反应」：拖拽现在会依次从 `dataTransfer.files`、`items`、
+  以及 `text/uri-list` / `text/plain` / `<img src>` 里找图；什么都没找到时给出
+  明确提示，而不是一声不响。上传时有「正在上传 2/8」的进度条。
+- 新增：拖「网页上的图 / 聊天里的图」（浏览器只给得出网址）时，网址交给服务端去
+  下载入库（新接口 `ui/fetch_url`）。带三道闸：只认 http/https、拒绝本机与内网
+  地址（SSRF）、大小沿用 `max_image_mb`。
+- 新增「整个文件夹批量导入」：本地挑一个文件夹，里面的图一次性全进库。
+- 拖到框外面时不会再让浏览器直接把图片打开（那样页面就没了）。
+- 配置项说明去掉「说白了：」引子，直接讲人话。
+- 测试：新增 `tests/test_page_ui.py`（钉住「页面里不许出现原生 confirm/alert」、
+  拖拽三种来源、文件夹导入、说明别写成空话）；`tests/test_web.py` 加 6 例覆盖
+  `ui/fetch_url`（含内网拦截）。共 254 例。
+
 ## 0.2.1
 
 - 修正面板侧栏页签显示成目录名 `meme` 的问题：补上 `pages.meme.title` 词条，

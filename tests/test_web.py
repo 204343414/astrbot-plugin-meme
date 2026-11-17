@@ -377,3 +377,86 @@ def test_config_save_partial_success_is_ok(env):
     assert payload["status"] == "ok"
     assert env["plugin"].config["cooldown_seconds"] == 10
     assert payload["data"]["errors"]
+
+
+# --- 拖进来的是网址（服务端代下） ---------------------------------------
+
+def _fake_fetch(monkeypatch, payload, calls=None):
+    """把 adapters.fetch_bytes 换成假下载器，顺便记下真被调用过。"""
+    import meme_plugin_under_test.meme.adapters as adapters
+
+    async def fake(url, timeout=30.0, headers=None, proxy=""):
+        if calls is not None:
+            calls.append({"url": url, "proxy": proxy})
+        if isinstance(payload, Exception):
+            raise payload
+        return payload
+
+    monkeypatch.setattr(adapters, "fetch_bytes", fake)
+
+
+def test_fetch_url_ingests_downloaded_bytes(env, monkeypatch):
+    calls = []
+    _fake_fetch(monkeypatch, jpeg_bytes(), calls)
+    data = data_of(
+        request(env, "post", "/astrbot_plugin_meme/ui/fetch_url",
+                json_body={"url": "https://example.com/memes/quote.jpg"})
+    )
+    assert data["ok"] is True
+    assert data["sourceUrl"].endswith("quote.jpg")
+    assert "example.com" in data["message"]
+    assert calls and calls[0]["url"] == "https://example.com/memes/quote.jpg"
+    assert state(env)["libraryTotal"] == 1
+
+
+def test_fetch_url_rejects_non_http(env, monkeypatch):
+    _fake_fetch(monkeypatch, jpeg_bytes())
+    payload = payload_of(
+        request(env, "post", "/astrbot_plugin_meme/ui/fetch_url",
+                json_body={"url": "file:///etc/passwd"})
+    )
+    assert payload["status"] == "error"
+    assert "http" in payload["message"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:6185/api/v1/plugins",
+        "http://localhost/x.png",
+        "http://192.168.1.10/a.png",
+        "http://[::1]/a.png",
+        "http://169.254.169.254/latest/meta-data/",
+    ],
+)
+def test_fetch_url_blocks_intranet(env, monkeypatch, url):
+    calls = []
+    _fake_fetch(monkeypatch, jpeg_bytes(), calls)
+    payload = payload_of(
+        request(env, "post", "/astrbot_plugin_meme/ui/fetch_url", json_body={"url": url})
+    )
+    assert payload["status"] == "error"
+    assert "内网" in payload["message"] or "本机" in payload["message"]
+    assert not calls, "拦在本机/内网之前，不该真的发出请求"
+
+
+def test_fetch_url_reports_download_failure(env, monkeypatch):
+    import httpx
+
+    _fake_fetch(monkeypatch, httpx.ConnectTimeout("连不上"))
+    payload = payload_of(
+        request(env, "post", "/astrbot_plugin_meme/ui/fetch_url",
+                json_body={"url": "https://example.com/a.jpg"})
+    )
+    assert payload["status"] == "error"
+    assert "下载失败" in payload["message"]
+
+
+def test_fetch_url_rejects_non_image(env, monkeypatch):
+    _fake_fetch(monkeypatch, b"<html>not an image</html>")
+    payload = payload_of(
+        request(env, "post", "/astrbot_plugin_meme/ui/fetch_url",
+                json_body={"url": "https://example.com/index.html"})
+    )
+    assert payload["status"] == "error"
+    assert "不是图片" in payload["message"]

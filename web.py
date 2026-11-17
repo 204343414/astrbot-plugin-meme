@@ -128,6 +128,7 @@ class MemeWebUI:
             ("state", self.state, ["GET"], "梗图库概览与候选列表"),
             ("detail", self.detail, ["GET"], "单张图的大图与审核信息"),
             ("upload", self.upload, ["POST"], "拖拽上传（可免审）"),
+            ("fetch_url", self.fetch_url, ["POST"], "拖进来的是图片网址时，服务端下载后入库"),
             ("delete", self.delete, ["POST"], "下架一张图"),
             ("toggle", self.toggle, ["POST"], "启用/停用一张图"),
             ("recheck", self.recheck, ["POST"], "重新审核一张图"),
@@ -206,6 +207,26 @@ class MemeWebUI:
             logger.warning("[Meme] 网页上传失败", exc_info=True)
             return _error(f"入库失败：{type(exc).__name__}: {exc}")
         return _ok(result)
+
+    async def fetch_url(self) -> Any:
+        """拖进来的是网址（网页上的图、聊天里的图）→ 服务端去下。
+
+        页面那边拿不到跨域字节，只能把 URL 递给服务端；服务端下完走的还是
+        :meth:`upload` 同一条入库管线（包括免审标记）。
+        """
+        payload = await _read_json()
+        try:
+            result = await self.plugin.web_fetch_url(
+                str(payload.get("url", "") or ""),
+                scope=str(payload.get("scope", "") or ""),
+                skip_review=payload.get("skip_review"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Meme] 按网址入库失败", exc_info=True)
+            return _error(f"入库失败：{type(exc).__name__}: {exc}")
+        if result.get("ok"):
+            return _ok(result)
+        return _error(str(result.get("message", "入库失败")), extra=result)
 
     async def delete(self) -> Any:
         payload = await _read_json()

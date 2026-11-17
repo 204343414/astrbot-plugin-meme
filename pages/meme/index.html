@@ -32,11 +32,17 @@
 
     <section id="dropzone" class="dropzone" tabindex="0">
       <input id="fileInput" type="file" accept="image/*" multiple hidden />
+      <input id="folderInput" type="file" accept="image/*" multiple webkitdirectory directory hidden />
       <div class="drop-main">
         <svg viewBox="0 0 24 24" aria-hidden="true" class="drop-icon"><path d="M12 16V4m0 0L8 8m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
         <div>
           <strong>把图片拖进来</strong>
-          <p>或者 <button class="link" id="pickFiles" type="button">点这里选文件</button>；支持一次拖多张。</p>
+          <p>
+            或者
+            <button class="link" id="pickFiles" type="button">点这里选文件</button> ·
+            <button class="link" id="pickFolder" type="button">整个文件夹批量导入</button>
+          </p>
+          <p class="drop-hint">一次可以拖多张；拖主页上的图（拿到的只是网址）也行，服务端会去下回来。</p>
         </div>
       </div>
       <div class="drop-options">
@@ -52,6 +58,7 @@
           </select>
         </label>
       </div>
+      <div id="uploadProgress" class="upload-progress hidden" aria-live="polite"></div>
       <div id="uploadLog" class="upload-log" aria-live="polite"></div>
     </section>
 
@@ -96,6 +103,16 @@
       <img id="modalImage" alt="" />
       <div id="modalInfo" class="modal-info"></div>
       <div id="modalActions" class="modal-actions"></div>
+    </div>
+  </div>
+
+  <div id="confirm" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-body confirm-body">
+      <p id="confirmText" class="confirm-text"></p>
+      <div class="modal-actions">
+        <button id="confirmOk" class="danger">确定</button>
+        <button id="confirmCancel" class="ghost">取消</button>
+      </div>
     </div>
   </div>
 

@@ -72,6 +72,36 @@ HELP_TEXT = """梗图玩法：
 /meme 测试 —— 用内置图跑一遍完整管线，看审核输出（管理员）"""
 
 
+def _looks_private_host(host: str) -> bool:
+    """这地址是不是指向「本机 / 内网」。
+
+    只挡字面量，不做 DNS 解析 —— 解析会在面板线程里卡住，而且挡不住 DNS
+    rebinding，收益不对等。挡掉 127.0.0.1、10.x、172.16-31.x、192.168.x、
+    169.254.x、::1 和 localhost 这些常见的，够用了。
+    """
+    import ipaddress
+
+    name = (host or "").strip().strip("[]").lower().rstrip(".")
+    if not name:
+        return True
+    if name in {"localhost", "localhost.localdomain"} or name.endswith(
+        (".local", ".internal", ".localdomain")
+    ):
+        return True
+    try:
+        ip = ipaddress.ip_address(name)
+    except ValueError:
+        return False  # 普通域名，交给网络层
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
 def _now_day_key(ts: float | None = None) -> str:
     moment = dt.datetime.fromtimestamp(ts or time.time())
     return moment.strftime("%Y-%m-%d")
@@ -103,7 +133,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.2.1",
+    "0.2.2",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -1177,6 +1207,54 @@ class MemePlugin(Star):
             }
         return result
 
+    async def web_fetch_url(self, url: str, *, scope: str = "", skip_review=None) -> dict:
+        """拖进来的只是一张图的**网址**（不是文件）→ 服务端去把它下回来。
+
+        为什么要在服务端下：面板页面跑在沙盒 iframe 里（面板给的是
+        ``sandbox="allow-scripts allow-forms allow-downloads"``，没有
+        ``allow-same-origin``），页面自己去 corss-origin 取字节是取不到的；
+        而拖拽「网页上的图」「聊天里的图」时，浏览器给的就是 URL。
+
+        三道闸：
+        1. 只认 http/https；
+        2. 不许指向本机/内网（这就是 SSRF 的门，面板一旦被谁点开也不能拿它探内网）；
+        3. 大小上限沿用 ``max_image_mb``。
+        """
+        from .meme.adapters import fetch_bytes
+        from .meme.media import human_size
+
+        target = str(url or "").strip()
+        if not target:
+            return {"ok": False, "message": "没拿到地址"}
+        parsed = urllib.parse.urlsplit(target)
+        if parsed.scheme not in ("http", "https"):
+            return {"ok": False, "message": f"只认 http/https 地址（拿到的是「{parsed.scheme or '空'}」）"}
+        host = parsed.hostname or ""
+        if not host:
+            return {"ok": False, "message": "这个地址里没有主机名"}
+        if _looks_private_host(host):
+            return {"ok": False, "message": f"这个地址指向本机/内网（{host}），不收"}
+        try:
+            data = await fetch_bytes(
+                target,
+                timeout=self._cfg_float("download_timeout_seconds", 30.0),
+                headers={"User-Agent": "AstrBot-Meme/1.0"},
+                proxy=self._proxy(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "message": f"下载失败：{type(exc).__name__}: {exc}"}
+        max_bytes = int(self._cfg_float("max_image_mb", 8.0) * 1024 * 1024)
+        if max_bytes and len(data) > max_bytes:
+            return {
+                "ok": False,
+                "message": f"这张太大了（{human_size(len(data))}，上限 {human_size(max_bytes)}）",
+            }
+        name = (parsed.path.rsplit("/", 1)[-1] or "downloaded")[:80]
+        result = await self.web_upload(data, name, scope=scope, skip_review=skip_review)
+        result["sourceUrl"] = target
+        result["message"] = f"{result.get('message', '')}（来自网址 {host}）"
+        return result
+
     async def _ingest_without_review(self, data: bytes, *, scope: str = ""):
         """免审入库：仍然做格式/大小/查重，只是跳过模型审核。"""
         from .meme.media import ext_for_mime, human_size, sha256_of, sniff_image
@@ -1280,7 +1358,7 @@ class MemePlugin(Star):
 
         payload = export_settings(self.cfg)
         payload["originLabels"] = ORIGIN_LABELS
-        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.2.1"}
+        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.2.2"}
         return payload
 
     async def web_save_settings(self, values: dict) -> dict:

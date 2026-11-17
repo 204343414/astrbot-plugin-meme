@@ -157,6 +157,29 @@ function renderGrid() {
 
 /* ---------------- 上传 ---------------- */
 
+/* 页面跑在面板的沙盒 iframe 里：sandbox="allow-scripts allow-forms
+ * allow-downloads" —— 没有 allow-modals。所以 window.confirm / alert / prompt
+ * 全部是静默失效（confirm 直接返回 false，点「确定」什么也不会发生）。
+ * 「点删除没反应」就是栽在这里，这里改成页面内的确认框。 */
+let confirmResolve = null;
+
+function ask(text, { okText = "确定", cancelText = "取消" } = {}) {
+  const box = el("confirm");
+  if (!box) return Promise.resolve(false);
+  el("confirmText").textContent = text;
+  el("confirmOk").textContent = okText;
+  el("confirmCancel").textContent = cancelText;
+  box.classList.remove("hidden");
+  return new Promise((resolve) => { confirmResolve = resolve; });
+}
+
+function closeConfirm(answer) {
+  el("confirm").classList.add("hidden");
+  const resolve = confirmResolve;
+  confirmResolve = null;
+  if (resolve) resolve(answer);
+}
+
 async function pushUploadOptions() {
   try {
     await apiPost("ui/options", {
@@ -176,12 +199,80 @@ function logUpload(text, bad = false) {
   while (el("uploadLog").childElementCount > 12) el("uploadLog").lastChild.remove();
 }
 
+function setProgress(text) {
+  const bar = el("uploadProgress");
+  if (!bar) return;
+  bar.textContent = text || "";
+  bar.classList.toggle("hidden", !text);
+}
+
+/* 从一次拖拽里把「能当图片的东西」抠出来。
+ * 三种情况都要接：
+ *  1. 从文件管理器拖：dataTransfer.files 有 File；
+ *  2. 某些浏览器只给 items（Chrome 拖文件夹/虚拟文件时 files 是空的）；
+ *  3. 从网页/聊天窗口拖图片：文件拿不到，只有 URL —— 交给服务端去下。 */
+function collectDrop(dataTransfer) {
+  const files = [];
+  const urls = [];
+  if (!dataTransfer) return { files, urls };
+
+  Array.from(dataTransfer.files || []).forEach((file) => {
+    if (file && (!file.type || file.type.startsWith("image/"))) files.push(file);
+  });
+  if (!files.length) {
+    Array.from(dataTransfer.items || []).forEach((item) => {
+      if (item.kind !== "file") return;
+      const file = item.getAsFile?.();
+      if (file && (!file.type || file.type.startsWith("image/"))) files.push(file);
+    });
+  }
+
+  const uriList = dataTransfer.getData?.("text/uri-list") || "";
+  const plain = dataTransfer.getData?.("text/plain") || "";
+  const html = dataTransfer.getData?.("text/html") || "";
+  const candidates = [
+    ...uriList.split(/\r?\n/),
+    ...plain.split(/\s+/),
+    ...Array.from(html.matchAll(/<img[^>]+src=["']([^"']+)["']/gi)).map((m) => m[1]),
+  ];
+  candidates.forEach((value) => {
+    const url = (value || "").trim();
+    if (/^https?:\/\//i.test(url) && !urls.includes(url)) urls.push(url);
+  });
+
+  return { files, urls };
+}
+
+async function importUrls(urls) {
+  const skip = el("optSkipReview").checked;
+  let done = 0;
+  for (const url of urls) {
+    done += 1;
+    setProgress(`正在让服务端下载 ${done}/${urls.length}：${url.slice(0, 60)}…`);
+    try {
+      const data = await apiPost("ui/fetch_url", {
+        url,
+        scope: el("optScope").value,
+        skip_review: skip,
+      }) || {};
+      const id = data.meme?.id ? `#${data.meme.id}` : "";
+      if (data.ok) logUpload(`${url.slice(0, 60)} → ${id || "已入库"}${data.duplicate ? " · 库里已有" : ""}`);
+      else logUpload(`${url.slice(0, 60)} → 没收：${data.message || "未知原因"}`, true);
+    } catch (error) {
+      logUpload(`${url.slice(0, 60)} → 下载入库失败：${error.message}`, true);
+    }
+  }
+  setProgress("");
+}
+
 async function uploadFiles(files) {
-  const list = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
+  const list = Array.from(files || []).filter((file) => !file.type || file.type.startsWith("image/"));
   if (!list.length) return;
   const skip = el("optSkipReview").checked;
-  el("uploadLog").innerHTML = "";
+  let done = 0;
   for (const file of list) {
+    done += 1;
+    setProgress(`正在上传 ${done}/${list.length}：${file.name}`);
     try {
       const result = await bridge.upload("ui/upload", file);
       const data = unwrap(result) || {};
@@ -195,7 +286,29 @@ async function uploadFiles(files) {
       logUpload(`${file.name} → 上传失败：${error.message}`, true);
     }
   }
+  setProgress("");
   await loadState();
+}
+
+async function handleDrop(dataTransfer) {
+  const { files, urls } = collectDrop(dataTransfer);
+  if (!files.length && !urls.length) {
+    logUpload(
+      "这次拖拽里既没有图片文件、也没有图片网址。从网页/聊天窗口拖图时如果浏览器没给网址，" +
+      "先把图存到本地再拖，或者用上面的「点这里选文件 / 整个文件夹批量导入」。",
+      true,
+    );
+    return;
+  }
+  if (files.length) {
+    logUpload(`收到 ${files.length} 个文件`);
+    await uploadFiles(files);
+  }
+  if (urls.length) {
+    logUpload(`收到 ${urls.length} 个网址（服务端去下载）`);
+    await importUrls(urls);
+    await loadState();
+  }
 }
 
 /* ---------------- 单张操作 ---------------- */
@@ -229,7 +342,8 @@ async function openDetail(id) {
 async function act(action, id) {
   try {
     if (action === "delete") {
-      if (!window.confirm(`确定删除 #${id}？（图片文件也会删掉）`)) return;
+      const yes = await ask(`确定下架 #${id}？图片文件也会一起删掉。`, { okText: "下架" });
+      if (!yes) return;
       const result = await apiPost("ui/delete", { id });
       logUpload(result.message || "已删除");
     } else if (action === "toggle") {
@@ -402,18 +516,48 @@ function bind() {
   });
 
   const zone = el("dropzone");
-  zone.addEventListener("dragover", (event) => {
-    event.preventDefault();
-    zone.classList.add("hot");
+  const markHot = (on) => zone.classList.toggle("hot", on);
+  ["dragenter", "dragover"].forEach((name) => {
+    zone.addEventListener(name, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      markHot(true);
+    });
   });
-  zone.addEventListener("dragleave", () => zone.classList.remove("hot"));
+  zone.addEventListener("dragleave", (event) => {
+    // 拖到子元素上也会触发 dragleave，用 relatedTarget 排除这种假离开
+    if (!zone.contains(event.relatedTarget)) markHot(false);
+  });
   zone.addEventListener("drop", (event) => {
     event.preventDefault();
-    zone.classList.remove("hot");
-    uploadFiles(event.dataTransfer?.files);
+    event.stopPropagation();
+    markHot(false);
+    handleDrop(event.dataTransfer).catch((error) => logUpload(`处理拖拽失败：${error.message}`, true));
   });
+  // 拖到框外面时别让浏览器直接把图打开（那样页面就没了）
+  ["dragover", "drop"].forEach((name) => {
+    window.addEventListener(name, (event) => {
+      if (!zone.contains(event.target)) event.preventDefault();
+    });
+  });
+
   el("pickFiles").addEventListener("click", () => el("fileInput").click());
-  el("fileInput").addEventListener("change", (event) => uploadFiles(event.target.files));
+  el("fileInput").addEventListener("change", (event) => {
+    uploadFiles(event.target.files);
+    event.target.value = "";
+  });
+  el("pickFolder").addEventListener("click", () => el("folderInput").click());
+  el("folderInput").addEventListener("change", (event) => {
+    uploadFiles(event.target.files);
+    event.target.value = "";
+  });
+
+  el("confirmOk").addEventListener("click", () => closeConfirm(true));
+  el("confirmCancel").addEventListener("click", () => closeConfirm(false));
+  el("confirm").addEventListener("click", (event) => {
+    if (event.target === el("confirm")) closeConfirm(false);
+  });
   el("optSkipReview").addEventListener("change", pushUploadOptions);
   el("optScope").addEventListener("change", pushUploadOptions);
 

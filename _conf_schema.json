@@ -2,34 +2,34 @@
   "自定义说明": {
     "type": "text",
     "title": "先看这里",
-    "description": "说白了：这个插件干四件事——随机发一张梗图、收群友投稿、用多模态模型审一遍再入库、把英文梗图变成中文。下面所有开关都能留默认，跑起来之后再慢慢调。",
+    "description": "这个插件干四件事——随机发一张梗图、收群友投稿、用多模态模型审一遍再入库、把英文梗图变成中文。下面所有开关都能留默认，跑起来之后再慢慢调。",
     "default": "① 审核和翻译都用「提供商」里已经配好的模型，填 Provider 的 ID 就行。\n② 中文化默认只翻文字（append），不动画面；想真的重画成中文版再改成 redraw。\n③ 每日推送是主动消息，需要群主在群设置里打开「机器人主动在群聊内发言」，否则会静默跳过。"
   },
   "cooldown_seconds": {
     "type": "int",
     "title": "同一个人的冷却（秒）",
-    "description": "说白了：同一个人在同一个群，多久才能再点一次 /meme。0 = 不限制。默认 60 秒，防刷屏。",
+    "description": "同一个人在同一个群，多久才能再点一次 /meme。0 = 不限制。默认 60 秒，防刷屏。",
     "default": 60,
     "min": 0
   },
   "send_cooldown_seconds": {
     "type": "int",
     "title": "同一个群的冷却（秒）",
-    "description": "说白了：一个群里两次发图之间最少隔多久，防两个人同时点导致连发。0 = 不限制。",
+    "description": "一个群里两次发图之间最少隔多久，防两个人同时点导致连发。0 = 不限制。",
     "default": 5,
     "min": 0
   },
   "caption_limit": {
     "type": "int",
     "title": "图注字数上限",
-    "description": "说白了：挂在图下面那行字最多几个字，超了截断加省略号。设为 0 = 不挂图注，只发图。",
+    "description": "挂在图下面那行字最多几个字，超了截断加省略号。设为 0 = 不挂图注，只发图。",
     "default": 160,
     "min": 0
   },
   "submission_scope": {
     "type": "string",
     "title": "投稿图的可见范围",
-    "description": "说白了：群友投的图，是只在这个群能刷到（group，默认），还是所有群共用（global）。选 group 更稳妥——别人投的图在别的群出现，容易引出转图和版权的事。",
+    "description": "群友投的图，是只在这个群能刷到（group，默认），还是所有群共用（global）。选 group 更稳妥——别人投的图在别的群出现，容易引出转图和版权的事。",
     "options": [
       "group",
       "global"
@@ -39,41 +39,41 @@
   "daily_submit_limit": {
     "type": "int",
     "title": "每人每天投稿上限",
-    "description": "说白了：一个人一天最多投几张，防有人一口气甩两百张把审核额度烧光。0 = 不限制。",
+    "description": "一个人一天最多投几张，防有人一口气甩两百张把审核额度烧光。0 = 不限制。",
     "default": 10,
     "min": 0
   },
   "submission_cooldown_seconds": {
     "type": "int",
     "title": "投稿冷却（秒）",
-    "description": "说白了：同一个人两次投稿之间要隔多久，避免一边刷屏一边烧审核。",
+    "description": "同一个人两次投稿之间要隔多久，避免一边刷屏一边烧审核。",
     "default": 30,
     "min": 0
   },
   "max_image_mb": {
     "type": "float",
     "title": "单张图大小上限（MB）",
-    "description": "说白了：超过这个大小的图直接不收。QQ 自己也是 10MB 上限，这里留一点余量，免得收进来又发不出去。",
+    "description": "超过这个大小的图直接不收。QQ 自己也是 10MB 上限，这里留一点余量，免得收进来又发不出去。",
     "default": 8.0,
     "min": 1.0
   },
   "download_timeout_seconds": {
     "type": "float",
     "title": "下载图片超时（秒）",
-    "description": "说白了：从 QQ 那边把图拉下来的等待时间。网络慢就调大。",
+    "description": "从 QQ 那边把图拉下来的等待时间。网络慢就调大。",
     "default": 30.0,
     "min": 5.0
   },
   "http_proxy": {
     "type": "string",
     "title": "出站代理（留空 = 跟 AstrBot 一致）",
-    "description": "说白了：插件自己发请求时走哪个代理。留空就用 AstrBot 全局配置里的 http_proxy——容器里一般都是靠它在出网，填错的表现是「拉图失败 / 重画超时」，日志里写着 Network is unreachable。",
+    "description": "插件自己发请求时走哪个代理。留空就用 AstrBot 全局配置里的 http_proxy——容器里一般都是靠它在出网，填错的表现是「拉图失败 / 重画超时」，日志里写着 Network is unreachable。",
     "default": ""
   },
   "moderation_provider_id": {
     "type": "string",
     "title": "审核用多模态 Provider",
-    "description": "说白了：必须选一个「能看图」的模型（比如 gemini / gpt / grok 这类多模态的）。插件把图交给它，它回一段 JSON 说明有没有色情、暴力、政治、水印，还有图里的文字是什么。不选 = 投稿一律拒收（默认 fail-closed，安全第一）。",
+    "description": "必须选一个「能看图」的模型（比如 gemini / gpt / grok 这类多模态的）。插件把图交给它，它回一段 JSON 说明有没有色情、暴力、政治、水印，还有图里的文字是什么。不选 = 投稿一律拒收（默认 fail-closed，安全第一）。",
     "hint": "点右边的按钮，从「提供商」里选；选完这个字段会显示它的 ID",
     "_special": "select_provider",
     "default": ""
@@ -81,7 +81,7 @@
   "nsfw_max_level": {
     "type": "int",
     "title": "允许的色情等级上限",
-    "description": "说白了：模型会把色情程度打成 0-4 级（0 安全，2 明显擦边，4 露骨）。填 1 表示「轻微暗示可以，擦边以上不收」。觉得太严就调到 2，想严格就填 0。这个数字同时会写进提示词，模型知道你的底线。",
+    "description": "模型会把色情程度打成 0-4 级（0 安全，2 明显擦边，4 露骨）。填 1 表示「轻微暗示可以，擦边以上不收」。觉得太严就调到 2，想严格就填 0。这个数字同时会写进提示词，模型知道你的底线。",
     "default": 1,
     "min": 0,
     "max": 4
@@ -89,7 +89,7 @@
   "reject_flags": {
     "type": "list",
     "title": "直接拒收的类别",
-    "description": "说白了：只按「类别」拦，不搞关键词黑名单——梗图的文字本来就是谐音错别字，关键词表一边误杀一边漏。可选项：sexual 色情、minor 未成年、gore 血腥、violence 打斗、politics 现实政治、hate 歧视、ads_or_watermark 广告/二维码/水印、text_heavy 文字太多、other 其他。留空列表 = 只靠色情等级判断。",
+    "description": "只按「类别」拦，不搞关键词黑名单——梗图的文字本来就是谐音错别字，关键词表一边误杀一边漏。可选项：sexual 色情、minor 未成年、gore 血腥、violence 打斗、politics 现实政治、hate 歧视、ads_or_watermark 广告/二维码/水印、text_heavy 文字太多、other 其他。留空列表 = 只靠色情等级判断。",
     "default": [
       "gore",
       "politics",
@@ -101,19 +101,19 @@
   "require_is_meme": {
     "type": "bool",
     "title": "必须判定为梗图才收",
-    "description": "说白了：开着的话，聊天记录截图、风景照、公告截图会被挡在门外。关掉的话只要不违规都收——但库里迟早全是没梗的图。",
+    "description": "开着的话，聊天记录截图、风景照、公告截图会被挡在门外。关掉的话只要不违规都收——但库里迟早全是没梗的图。",
     "default": true
   },
   "moderation_fail_closed": {
     "type": "bool",
     "title": "审核失败时拒收",
-    "description": "说白了：模型超时、报错、回了一段解析不了的文字时，是「先不收」（开着，默认）还是「照收」（关掉）。建议开着：审核挂了等于没人看过这张图。",
+    "description": "模型超时、报错、回了一段解析不了的文字时，是「先不收」（开着，默认）还是「照收」（关掉）。建议开着：审核挂了等于没人看过这张图。",
     "default": true
   },
   "caption_zh_mode": {
     "type": "string",
     "title": "英文梗图怎么变中文",
-    "description": "说白了：off = 啥也不做；append = 只把图里的英文抄下来翻成中文，挂在图下面那条消息里（默认，便宜、不动画面、100% 成功）；redraw = 真的调画图模型重画一张中文版（贵、慢，模型不保证「其他不要改动」，所以重画完要再审一次）。",
+    "description": "off = 啥也不做；append = 只把图里的英文抄下来翻成中文，挂在图下面那条消息里（默认，便宜、不动画面、100% 成功）；redraw = 真的调画图模型重画一张中文版（贵、慢，模型不保证「其他不要改动」，所以重画完要再审一次）。",
     "options": [
       "off",
       "append",
@@ -124,39 +124,39 @@
   "translate_provider_id": {
     "type": "string",
     "title": "翻译用的 Provider（留空 = 跟审核共用）",
-    "description": "说白了：只翻一行字，用便宜的小模型就够，留空就地复用审核那个多模态模型。",
+    "description": "只翻一行字，用便宜的小模型就够，留空就地复用审核那个多模态模型。",
     "_special": "select_provider",
     "default": ""
   },
   "redraw_provider_id": {
     "type": "string",
     "title": "画图用 Provider（redraw 才需要）",
-    "description": "说白了：从「提供商」里选一个 OpenAI 兼容的线路（有画图能力的）。插件会读它的地址和密钥，去调 /v1/images/edits——所以你可以直接在这里「一键选中」你平时的画图线路，不用再抄一遍密钥。",
+    "description": "从「提供商」里选一个 OpenAI 兼容的线路（有画图能力的）。插件会读它的地址和密钥，去调 /v1/images/edits——所以你可以直接在这里「一键选中」你平时的画图线路，不用再抄一遍密钥。",
     "_special": "select_provider",
     "default": ""
   },
   "redraw_model": {
     "type": "string",
     "title": "重绘模型名",
-    "description": "说白了：真正出图的那个模型名，比如 gpt-image-2.6-sunburst 或 grok-imagine-image-quality。留空 = 用上面那个 Provider 自己的模型名（如果它本来就是画图模型，留空最省事）。",
+    "description": "真正出图的那个模型名，比如 gpt-image-2.6-sunburst 或 grok-imagine-image-quality。留空 = 用上面那个 Provider 自己的模型名（如果它本来就是画图模型，留空最省事）。",
     "default": ""
   },
   "redraw_prompt": {
     "type": "string",
     "title": "重绘提示词",
-    "description": "说白了：让画图模型干什么。默认就是你点名的那句——「把当前meme梗图，只翻译留言和主要语言变成中文，其他不要改动」。插件还会在它后面自动补一句「不许改构图/画风/配色，不许加字」，防止模型顺手重画。",
+    "description": "让画图模型干什么。默认就是你点名的那句——「把当前meme梗图，只翻译留言和主要语言变成中文，其他不要改动」。插件还会在它后面自动补一句「不许改构图/画风/配色，不许加字」，防止模型顺手重画。",
     "default": "把当前meme梗图，只翻译留言和主要语言变成中文，其他不要改动。"
   },
   "redraw_size": {
     "type": "string",
     "title": "重绘尺寸",
-    "description": "说白了：重画出来的边长。1024x1024 最通用；原图是长方形的可以试 1536x1024。",
+    "description": "重画出来的边长。1024x1024 最通用；原图是长方形的可以试 1536x1024。",
     "default": "1024x1024"
   },
   "redraw_quality": {
     "type": "string",
     "title": "重绘质量",
-    "description": "说白了：auto 让接口自己决定；low 便宜快，high 慢且贵。只翻几个字的话 low 其实够。",
+    "description": "auto 让接口自己决定；low 便宜快，high 慢且贵。只翻几个字的话 low 其实够。",
     "options": [
       "",
       "auto",
@@ -169,74 +169,74 @@
   "redraw_recheck": {
     "type": "bool",
     "title": "重画完再审一次",
-    "description": "说白了：画图模型偶尔会把一张正常梗图改成擦边图。开着的话重画版必须再过一次审核才入库，不过就退回原图 + 字幕翻译。建议一直开着。",
+    "description": "画图模型偶尔会把一张正常梗图改成擦边图。开着的话重画版必须再过一次审核才入库，不过就退回原图 + 字幕翻译。建议一直开着。",
     "default": true
   },
   "redraw_timeout_seconds": {
     "type": "float",
     "title": "重绘超时（秒）",
-    "description": "说白了：画图接口最多等多久。画图本来就慢，120 秒比较稳；超时就退回字幕模式。",
+    "description": "画图接口最多等多久。画图本来就慢，120 秒比较稳；超时就退回字幕模式。",
     "default": 120.0,
     "min": 10.0
   },
   "weight_bundled": {
     "type": "float",
     "title": "内置图权重",
-    "description": "说白了：随机挑图时，内置素材占多大比重。权重是相对的：内置 1 + 投稿 3 意味着大约 25% 发内置、75% 发群友投的。设 0 = 不发内置图。",
+    "description": "随机挑图时，内置素材占多大比重。权重是相对的：内置 1 + 投稿 3 意味着大约 25% 发内置、75% 发群友投的。设 0 = 不发内置图。",
     "default": 1.0,
     "min": 0.0
   },
   "weight_submitted": {
     "type": "float",
     "title": "投稿图权重",
-    "description": "说白了：群友投稿的图占多大比重。调高 = 越用越像这个群自己的口味。",
+    "description": "群友投稿的图占多大比重。调高 = 越用越像这个群自己的口味。",
     "default": 3.0,
     "min": 0.0
   },
   "weight_api": {
     "type": "float",
     "title": "第三方接口图权重",
-    "description": "说白了：从外部 API 拉回来的图占多大比重。默认 0.5，小一点更稳（外面的图不一定对味）。没配接口地址时这一项自动无效。",
+    "description": "从外部 API 拉回来的图占多大比重。默认 0.5，小一点更稳（外面的图不一定对味）。没配接口地址时这一项自动无效。",
     "default": 0.5,
     "min": 0.0
   },
   "weight_generated": {
     "type": "float",
     "title": "AI 现画图权重",
-    "description": "说白了：留给「让 AI 现画一张」这个来源的位置，现在是 0（这一版还没接）。确保它不会变成一堆永远不会被抽到的图。",
+    "description": "留给「让 AI 现画一张」这个来源的位置，现在是 0（这一版还没接）。确保它不会变成一堆永远不会被抽到的图。",
     "default": 0.0,
     "min": 0.0
   },
   "third_party_api_url": {
     "type": "string",
     "title": "第三方梗图接口地址",
-    "description": "说白了：一个能返回随机梗图的网址。留空 = 不用这个来源，完全靠内置图 + 群友投稿（最稳的方案）。填了之后，库里没图或者权重抽到它时才会去拉。",
+    "description": "一个能返回随机梗图的网址。留空 = 不用这个来源，完全靠内置图 + 群友投稿（最稳的方案）。填了之后，库里没图或者权重抽到它时才会去拉。",
     "default": ""
   },
   "third_party_api_json_path": {
     "type": "string",
     "title": "从返回 JSON 里取图地址的路径",
-    "description": "说白了：接口回的是 JSON 的话，图片地址在第几层就写第几层，比如 data.url 或 data.0.url（.0 表示取数组第 0 个）。接口直接返回图片本体（302 到一张图）的话，这项留空。",
+    "description": "接口回的是 JSON 的话，图片地址在第几层就写第几层，比如 data.url 或 data.0.url（.0 表示取数组第 0 个）。接口直接返回图片本体（302 到一张图）的话，这项留空。",
     "default": ""
   },
   "third_party_api_timeout_seconds": {
     "type": "float",
     "title": "第三方接口超时（秒）",
-    "description": "说白了：拉图最多等多久，超时就当没这回事，不影响群里点 /meme。",
+    "description": "拉图最多等多久，超时就当没这回事，不影响群里点 /meme。",
     "default": 30.0,
     "min": 5.0
   },
   "daily_push_max_per_day": {
     "type": "int",
     "title": "每个群每天最多推几条",
-    "description": "说白了：定时推送的上限。QQ 官方给的额度是每群每天 1000 条，但推多了会被群友嫌吵，2 条基本是「早上看一眼、睡前看一眼」的量。",
+    "description": "定时推送的上限。QQ 官方给的额度是每群每天 1000 条，但推多了会被群友嫌吵，2 条基本是「早上看一眼、睡前看一眼」的量。",
     "default": 2,
     "min": 0
   },
   "daily_push_slots": {
     "type": "list",
     "title": "默认推送时间",
-    "description": "说白了：群主第一次用 /meme 每日 没写时间时，就用这里的时间点。格式是 HH:MM，可以写多个。",
+    "description": "群主第一次用 /meme 每日 没写时间时，就用这里的时间点。格式是 HH:MM，可以写多个。",
     "default": [
       "09:00",
       "21:00"
@@ -245,31 +245,31 @@
   "daily_push_quiet_start": {
     "type": "string",
     "title": "免打扰开始时间",
-    "description": "说白了：这段时间内不主动发图（怕半夜吵人）。和下面那项配合，跨零点也支持，比如 23:00 → 08:00。留空 = 不设免打扰。",
+    "description": "这段时间内不主动发图（怕半夜吵人）。和下面那项配合，跨零点也支持，比如 23:00 → 08:00。留空 = 不设免打扰。",
     "default": ""
   },
   "daily_push_quiet_end": {
     "type": "string",
     "title": "免打扰结束时间",
-    "description": "说白了：免打扰到几点结束，到了之后定时推送恢复正常。",
+    "description": "免打扰到几点结束，到了之后定时推送恢复正常。",
     "default": ""
   },
   "timezone": {
     "type": "string",
     "title": "定时任务时区（留空 = 跟 AstrBot 一致）",
-    "description": "说白了：每日推送按哪个时区算。留空最稳——AstrBot 自己配过时区了。要写就写 Asia/Shanghai。",
+    "description": "每日推送按哪个时区算。留空最稳——AstrBot 自己配过时区了。要写就写 Asia/Shanghai。",
     "default": ""
   },
   "extra_admins": {
     "type": "list",
     "title": "额外的管理员 ID",
-    "description": "说白了：除了 AstrBot 全局 admins_id 之外，还允许谁用「删/审核/每日/拉/测试」这些管理命令。群里的小管理员可以写在这里。",
+    "description": "除了 AstrBot 全局 admins_id 之外，还允许谁用「删/审核/每日/拉/测试」这些管理命令。群里的小管理员可以写在这里。",
     "default": []
   },
   "custom_data_dir": {
     "type": "string",
     "title": "数据目录（一般不用填）",
-    "description": "说白了：图库和数据库放哪儿。留空 = 用 AstrBot 官方的 data/plugin_data/astrbot_plugin_meme（重装插件也不丢）。别指到插件源码目录里——重装会一起没。",
+    "description": "图库和数据库放哪儿。留空 = 用 AstrBot 官方的 data/plugin_data/astrbot_plugin_meme（重装插件也不丢）。别指到插件源码目录里——重装会一起没。",
     "default": ""
   }
 }
