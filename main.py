@@ -1737,6 +1737,65 @@ class MemePlugin(Star):
             return IngestResult(ok=False, reason="入库失败（数据库异常）")
         return IngestResult(ok=True, meme=meme, reason="已免审入库")
 
+    async def web_card_probe(self) -> dict:
+        """卡片图自检：素材库 → 图床，逐项试，结果说人话。"""
+        hub = self._get_hub(quiet=True)
+        if hub is None:
+            return {"ok": False, "message": "没有 QQ Official Hub，卡片用不了（会退纯图片）"}
+        bundled = os.path.join(os.path.dirname(__file__), "assets", "bundled")
+        data = b""
+        if os.path.isdir(bundled):
+            for name in sorted(os.listdir(bundled)):
+                path = os.path.join(bundled, name)
+                if os.path.isfile(path):
+                    with open(path, "rb") as fh:
+                        data = fh.read()
+                    break
+        if not data:
+            return {"ok": False, "message": "插件里没有内置图，没法自检"}
+        width, height = _image_size(data)
+        report: dict[str, Any] = {"ok": False, "size": f"{width}x{height}", "checks": []}
+
+        upload = getattr(hub, "publish_image_material", None)
+        if upload is None:
+            report["checks"].append({"name": "素材库", "ok": False, "detail": "Hub 版本不支持"})
+        else:
+            try:
+                material = await upload(data, origin="meme:probe")
+                image_id = str(material.get("image_id") or "")
+                url = str(material.get("url") or "")
+                removed = await self._release_material(hub, image_id, origin="meme:probe")
+                report["checks"].append({
+                    "name": "素材库", "ok": bool(url),
+                    "detail": f"拿到了 {url.split('/v1/')[0] + '/v1/…' if url else '空地址'}，已回收",
+                })
+                report["ok"] = bool(url)
+            except Exception as exc:  # noqa: BLE001
+                report["checks"].append({
+                    "name": "素材库", "ok": False,
+                    "detail": f"{type(exc).__name__}: {exc}",
+                })
+
+        if not report["ok"]:
+            publisher = getattr(hub, "publish_image_checked", None)
+            if publisher is not None:
+                try:
+                    url = await publisher(data, slot="meme:probe")
+                    report["checks"].append({
+                        "name": "图床", "ok": bool(url), "detail": url or "空地址",
+                    })
+                    report["ok"] = bool(url)
+                except Exception as exc:  # noqa: BLE001
+                    report["checks"].append({
+                        "name": "图床", "ok": False,
+                        "detail": f"{type(exc).__name__}: {exc}",
+                    })
+        report["message"] = (
+            "卡片图能显示（走素材库）" if report["ok"]
+            else "卡片带图这条路暂时不通，会降级成「图片 + 无图卡片」，按钮照常"
+        )
+        return report
+
     async def web_delete(self, raw_id: str) -> dict:
         try:
             meme_id = int(str(raw_id).lstrip("#"))

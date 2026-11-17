@@ -20,8 +20,10 @@
   管理员永不拉黑；被拉黑的人再投稿，**一次模型都不调用**。
 - 新增 `/meme 黑名单`、`/meme 解禁 <用户ID>`（管理员）。
 - 新增 7 项配置；`_conf_schema.json` 共 45 项。
-- 测试：新增 `test_cards.py`(15) / `test_ban.py`(29) / `test_submit_ban.py`(12)，
-  共 310 例。
+- 新增面板接口 `ui/card_probe`（自检）：上传一张内置图到 QQ 素材库再当场回收，
+  一眼看出「卡片里的图能不能显示」，不用去群里发消息试。
+- 测试：新增 `test_cards.py`(19) / `test_ban.py`(29) / `test_submit_ban.py`(12)，
+  共 314 例。
 
 ## 0.2.2
 

@@ -134,6 +134,7 @@ class MemeWebUI:
             ("recheck", self.recheck, ["POST"], "重新审核一张图"),
             ("options", self.options_router, ["GET", "POST"], "上传选项（免审/可见范围）"),
             ("config", self.config_router, ["GET", "POST"], "读取/保存可调参数"),
+            ("card_probe", self.card_probe, ["POST"], "自检：卡片图能不能进 QQ 素材库"),
         ]
         for name, handler, methods, desc in table:
             route = f"{ROUTE_PREFIX}/{name}"
@@ -260,6 +261,20 @@ class MemeWebUI:
             )
             return _ok(result)
         return _ok(self.plugin.web_upload_options())
+
+    async def card_probe(self) -> Any:
+        """自检：上传一张内置图到 QQ 素材库，然后立刻删掉。
+
+        卡片能不能显示图，取决于这条链路（素材库 / 图床）。它挂了的表现是
+        「卡片发出去了但图是裂的」，非常难查 —— 所以给面板一个能一键验的入口。
+        只上传不发送，验证完当场回收额度，群里不会多出任何消息。
+        """
+        try:
+            result = await self.plugin.web_card_probe()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Meme] 卡片图自检失败", exc_info=True)
+            return _error(f"自检失败：{type(exc).__name__}: {exc}")
+        return _ok(result)
 
     async def config_router(self) -> Any:
         if await _current_method() == "POST":

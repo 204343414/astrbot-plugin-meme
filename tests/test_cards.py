@@ -248,3 +248,53 @@ def test_rejected_card_releases_material(plugin):
     assert asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), jpeg_bytes())) is False
     assert hub.deleted == ["img1"]
     assert instance.store.card_material_ids() == []
+
+
+# --- 素材自检（面板上的「卡片图能不能显示」） ------------------------------
+
+def test_card_probe_reports_material_ok_and_cleans_up(plugin):
+    instance, _context = plugin
+    hub = FakeHub()
+    instance._hub = hub
+
+    import asyncio
+
+    report = asyncio.run(instance.web_card_probe())
+    assert report["ok"] is True
+    assert report["checks"][0]["name"] == "素材库"
+    # 只上传不发送，验证完当场回收，群里不会多出消息
+    assert hub.cards == []
+    assert hub.deleted == ["img1"]
+
+
+def test_card_probe_falls_back_to_image_host(plugin):
+    instance, _context = plugin
+    instance._hub = FakeHub(material_ok=False, host_ok=True)
+
+    import asyncio
+
+    report = asyncio.run(instance.web_card_probe())
+    assert report["ok"] is True
+    assert [check["name"] for check in report["checks"]] == ["素材库", "图床"]
+
+
+def test_card_probe_explains_failure(plugin):
+    instance, _context = plugin
+    instance._hub = FakeHub(material_ok=False, host_ok=False)
+
+    import asyncio
+
+    report = asyncio.run(instance.web_card_probe())
+    assert report["ok"] is False
+    assert "降级" in report["message"]
+
+
+def test_card_probe_without_hub(plugin):
+    instance, _context = plugin
+    instance._hub = None
+    instance._get_hub = lambda quiet=False: None
+
+    import asyncio
+
+    report = asyncio.run(instance.web_card_probe())
+    assert report["ok"] is False and "Hub" in report["message"]
