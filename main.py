@@ -178,7 +178,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.6.0",
+    "0.6.1",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):

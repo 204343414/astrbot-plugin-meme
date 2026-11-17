@@ -6,6 +6,24 @@
 const bridge = window.AstrBotPluginPage || window.AstrBotPluginView;
 const el = (id) => document.getElementById(id);
 
+/* 挂事件必须走这里。
+ *
+ * 以前这里是一串「el(某 id).addEventListener」：只要有一个 id 在 HTML 里
+ * 不存在（比如「可见范围」下拉框删了、代码还留着），第一行就抛 TypeError，
+ * **后面所有按钮全都挂不上** —— 症状是「调参点了没反应、统计永远显示 —」，
+ * 而且控制台只看得到一句 TypeError，极难往「前面某个元素没了」上想。
+ * 现在：缺元素只跳过它自己，并且明确进 console.warn。
+ */
+function on(id, type, handler) {
+  const node = el(id);
+  if (!node) {
+    console.warn(`[meme page] 跳过 ${id} 的 ${type}：页面上没有这个元素`);
+    return null;
+  }
+  node.addEventListener(type, handler);
+  return node;
+}
+
 const state = {
   origin: "all",
   q: "",
@@ -108,6 +126,7 @@ async function loadState({ append = false } = {}) {
     }
     el("statAuto").title = lines.join("\n");
   }
+  renderAuto(payload.auto || {});
   el("statMode").textContent = payload.running?.captionMode || "—";
   el("statProvider").textContent = payload.running?.moderationProvider || "未配";
   el("statProvider").title = payload.running?.moderationProvider || "";
@@ -120,6 +139,55 @@ async function loadState({ append = false } = {}) {
   renderBans(payload.blacklist || []);
   renderCardInfo(payload.card || {});
   el("loadMore").classList.toggle("hidden", !payload.hasMore);
+}
+
+function renderAuto(auto) {
+  const box = el("autoGroups");
+  const summary = el("autoSummary");
+  if (!box || !summary) return;
+  const pcts = auto.pcts || {};
+  const subs = Array.isArray(auto.subscribed) ? auto.subscribed : [];
+  const offed = Array.isArray(auto.offed) ? auto.offed : [];
+  const LEVEL = { low: "低", mid: "中", high: "高" };
+
+  summary.innerHTML =
+    (auto.enabled ? "总开关：开" : "<b>总开关：关</b>") +
+    ` · 三档 低 ${pcts.low ?? 10}% / 中 ${pcts.mid ?? 25}% / 高 ${pcts.high ?? 50}%` +
+    ` · 每群每天上限 ${auto.maxPerDay || "不限"}` +
+    ` · 免打扰 ${auto.quiet || "不设"}` +
+    ` · <b>${subs.length} 个群订阅中</b>`;
+
+  if (!subs.length) {
+    box.innerHTML = '<div class="msg">还没有群订阅自动推送。在群里发 /meme，点卡片上的「自动订阅」即可。</div>';
+  } else {
+    box.innerHTML = subs
+      .map((row) => {
+        const level = LEVEL[row.level] || row.level || "?";
+        const cooling = row.blockedUntil * 1000 > Date.now();
+        return `<div class="auto-row">
+          <span class="auto-group">群 ${escapeHtml(row.group)}</span>
+          <span class="auto-level">${level}档 ${row.pct}%/小时</span>
+          <span class="auto-count">今天 ${row.sentToday} 条</span>
+          ${cooling ? '<span class="auto-flag">冷却中</span>' : ""}
+        </div>`;
+      })
+      .join("");
+  }
+
+  const offedBox = el("autoOffed");
+  if (offedBox) {
+    offedBox.innerHTML = offed.length
+      ? "被自动关掉的群：" +
+        offed
+          .map(
+            (row) =>
+              `${escapeHtml(String(row.umo).slice(-8))}（${
+                row.reason === "gone" ? "机器人不在群里" : "群没开主动消息"
+              }）`
+          )
+          .join("、")
+      : "";
+  }
 }
 
 function renderBans(entries) {
@@ -508,10 +576,10 @@ async function saveSettings() {
 /* ---------------- 事件绑定 ---------------- */
 
 function bind() {
-  el("refresh").addEventListener("click", () => loadState().catch(showError));
-  el("loadMore").addEventListener("click", () => loadState({ append: true }).catch(showError));
+  on("refresh", "click", () => loadState().catch(showError));
+  on("loadMore", "click", () => loadState({ append: true }).catch(showError));
 
-  el("originChips").addEventListener("click", (event) => {
+  on("originChips", "click", (event) => {
     const chip = event.target.closest(".chip");
     if (!chip) return;
     state.origin = chip.dataset.origin;
@@ -519,20 +587,20 @@ function bind() {
   });
 
   let searchTimer = 0;
-  el("search").addEventListener("input", (event) => {
+  on("search", "input", (event) => {
     state.q = event.target.value.trim();
     window.clearTimeout(searchTimer);
     searchTimer = window.setTimeout(() => loadState().catch(showError), 250);
   });
-  el("sort").addEventListener("change", (event) => {
+  on("sort", "change", (event) => {
     state.sort = event.target.value;
     loadState().catch(showError);
   });
-  el("statusFilter").addEventListener("change", (event) => {
+  on("statusFilter", "change", (event) => {
     state.status = event.target.value;
     loadState().catch(showError);
   });
-  el("grid").addEventListener("click", (event) => {
+  on("grid", "click", (event) => {
     const card = event.target.closest(".card");
     if (!card) return;
     const action = event.target.closest("[data-act]")?.dataset.act || "open";
@@ -541,11 +609,11 @@ function bind() {
     else act(action, id);
   });
 
-  el("modalClose").addEventListener("click", () => el("modal").classList.add("hidden"));
-  el("modal").addEventListener("click", (event) => {
+  on("modalClose", "click", () => el("modal").classList.add("hidden"));
+  on("modal", "click", (event) => {
     if (event.target === el("modal")) el("modal").classList.add("hidden");
   });
-  el("modalActions").addEventListener("click", (event) => {
+  on("modalActions", "click", (event) => {
     const id = el("modal").dataset.id;
     if (event.target.id === "modalRecheck") act("recheck", id);
     if (event.target.id === "modalToggle") act("toggle", id);
@@ -579,31 +647,30 @@ function bind() {
     });
   });
 
-  el("pickFiles").addEventListener("click", () => el("fileInput").click());
-  el("fileInput").addEventListener("change", (event) => {
+  on("pickFiles", "click", () => el("fileInput").click());
+  on("fileInput", "change", (event) => {
     uploadFiles(event.target.files);
     event.target.value = "";
   });
-  el("pickFolder").addEventListener("click", () => el("folderInput").click());
-  el("folderInput").addEventListener("change", (event) => {
+  on("pickFolder", "click", () => el("folderInput").click());
+  on("folderInput", "change", (event) => {
     uploadFiles(event.target.files);
     event.target.value = "";
   });
 
-  el("confirmOk").addEventListener("click", () => closeConfirm(true));
-  el("confirmCancel").addEventListener("click", () => closeConfirm(false));
-  el("confirm").addEventListener("click", (event) => {
+  on("confirmOk", "click", () => closeConfirm(true));
+  on("confirmCancel", "click", () => closeConfirm(false));
+  on("confirm", "click", (event) => {
     if (event.target === el("confirm")) closeConfirm(false);
   });
-  el("optSkipReview").addEventListener("change", pushUploadOptions);
-  el("optScope").addEventListener("change", pushUploadOptions);
+  on("optSkipReview", "change", pushUploadOptions);
 
-  el("toggleBans").addEventListener("click", () => {
+  on("toggleBans", "click", () => {
     const box = el("bans");
     box.classList.toggle("hidden");
     if (!box.classList.contains("hidden")) loadState().catch(showError);
   });
-  el("banList").addEventListener("click", async (event) => {
+  on("banList", "click", async (event) => {
     const button = event.target.closest("[data-unban]");
     if (!button) return;
     const id = button.dataset.unban;
@@ -617,7 +684,7 @@ function bind() {
       logUpload(`解禁失败：${error.message}`, true);
     }
   });
-  el("cardProbe").addEventListener("click", async () => {
+  on("cardProbe", "click", async () => {
     el("probeMsg").textContent = "自检中…";
     el("probeMsg").className = "msg";
     try {
@@ -633,13 +700,28 @@ function bind() {
     }
   });
 
-  el("toggleSettings").addEventListener("click", () => {
+  on("toggleSettings", "click", () => {
     const box = el("settings");
-    box.classList.toggle("hidden");
-    if (!box.classList.contains("hidden") && !state.settings) loadSettings().catch(showError);
+    const open = box.classList.toggle("hidden") === false;
+    // 按钮文字跟着变，否则「点了像没反应」—— 参数区在页面下方，很容易看不见
+    const button = el("toggleSettings");
+    if (button) button.textContent = open ? "收起调参" : "调参";
+    if (open) {
+      box.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (!state.settings) {
+        loadSettings().catch((error) => {
+          const msg = el("settingsMsg");
+          if (msg) {
+            msg.textContent = `读取参数失败：${error.message || error}`;
+            msg.className = "msg bad";
+          }
+          showError(error);
+        });
+      }
+    }
   });
-  el("saveSettings").addEventListener("click", saveSettings);
-  el("resetSettings").addEventListener("click", () => loadSettings().catch(showError));
+  on("saveSettings", "click", saveSettings);
+  on("resetSettings", "click", () => loadSettings().catch(showError));
 }
 
 function showError(error) {
@@ -650,7 +732,12 @@ function showError(error) {
 }
 
 async function boot() {
-  bind();
+  try {
+    bind();
+  } catch (error) {
+    // 兜底：bind 再出意外也要把数据读出来（统计能看比按钮全死强）
+    console.error("[meme page] 绑定事件出错", error);
+  }
   try {
     if (bridge?.ready) await bridge.ready();
     const options = await apiGet("ui/options");
