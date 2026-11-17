@@ -100,7 +100,10 @@ CREATE TABLE IF NOT EXISTS card_materials (
     url        TEXT NOT NULL DEFAULT '',
     last_used  REAL NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_card_materials_sha ON card_materials(sha256);
+
+-- 注意：card_materials 的 sha256 索引不能写在这里。老库的 card_materials 表已存在，
+-- CREATE TABLE IF NOT EXISTS 会跳过建表、只留下缺列的老表，此时建索引会直接报
+-- "no such column: sha256" 把整个插件加载打挂。索引统一放到 init() 里补完列之后建。
 """
 
 

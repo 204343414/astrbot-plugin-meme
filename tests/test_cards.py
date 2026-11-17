@@ -401,3 +401,35 @@ def test_stale_cache_is_ignored_without_asking_qq(plugin):
     asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), data))
     assert instance.store.material_for_sha(sha)
     assert "img2" in hub.cards[-1]["markdown"]
+
+def test_old_db_without_sha_column_still_loads(tmp_path):
+    """老库的 card_materials 表没有 sha256 列时，init() 必须先补列再建索引。
+
+    回归用：把索引写在建表脚本里、而补列在脚本之后，会报 no such column: sha256，
+    直接导致整个插件加载失败。
+    """
+    import sqlite3
+
+    from meme.store import MemeStore
+
+    db = tmp_path / "meme.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE card_materials (
+            image_id   TEXT PRIMARY KEY,
+            meme_id    INTEGER NOT NULL DEFAULT 0,
+            origin     TEXT NOT NULL DEFAULT '',
+            created_at REAL NOT NULL DEFAULT 0
+        );
+        INSERT INTO card_materials(image_id, created_at) VALUES ('old1', 1.0);
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = MemeStore(str(db))
+    store.init()
+    cols = {row["name"] for row in store._rows("PRAGMA table_info(card_materials)")}
+    assert {"sha256", "url", "last_used"} <= cols
+    assert store.card_material_ids() == ["old1"]
