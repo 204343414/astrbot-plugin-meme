@@ -90,7 +90,38 @@ async function loadState({ append = false } = {}) {
   renderGroupFilter();
   renderChips(payload.origins || []);
   renderGrid();
+  renderBans(payload.blacklist || []);
+  renderCardInfo(payload.card || {});
   el("loadMore").classList.toggle("hidden", !payload.hasMore);
+}
+
+function renderBans(entries) {
+  const box = el("banList");
+  if (!entries.length) {
+    box.innerHTML = '<div class="msg">还没有人被禁止投稿。</div>';
+    return;
+  }
+  box.innerHTML = entries
+    .map(
+      (entry) => `
+      <div class="ban-row">
+        <span class="who">${escapeHtml(entry.sender_id)}</span>
+        <span class="why">${escapeHtml(entry.reason || "未写理由")} · 累计 ${entry.hits || 1} 次</span>
+        <button class="ghost" data-unban="${escapeHtml(entry.sender_id)}">解禁</button>
+      </div>`
+    )
+    .join("");
+}
+
+function renderCardInfo(card) {
+  if (!card || !Object.keys(card).length) {
+    el("cardInfo").textContent = "";
+    return;
+  }
+  el("cardInfo").textContent = card.enabled
+    ? `卡片已开（按钮：${card.showAgain ? "再来一张 " : ""}${card.showHowto ? "我要投稿" : ""}）· ` +
+      `素材图 ${card.materials}/${card.materialKeep} 张`
+    : "卡片已关（发的是纯图片）";
 }
 
 function renderGroupFilter() {
@@ -560,6 +591,41 @@ function bind() {
   });
   el("optSkipReview").addEventListener("change", pushUploadOptions);
   el("optScope").addEventListener("change", pushUploadOptions);
+
+  el("toggleBans").addEventListener("click", () => {
+    const box = el("bans");
+    box.classList.toggle("hidden");
+    if (!box.classList.contains("hidden")) loadState().catch(showError);
+  });
+  el("banList").addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-unban]");
+    if (!button) return;
+    const id = button.dataset.unban;
+    const yes = await ask(`恢复 ${id} 的投稿权限？`, { okText: "解禁" });
+    if (!yes) return;
+    try {
+      const result = await apiPost("ui/unban", { id });
+      logUpload(result.message || "已解禁");
+      await loadState();
+    } catch (error) {
+      logUpload(`解禁失败：${error.message}`, true);
+    }
+  });
+  el("cardProbe").addEventListener("click", async () => {
+    el("probeMsg").textContent = "自检中…";
+    el("probeMsg").className = "msg";
+    try {
+      const report = await apiPost("ui/card_probe", {});
+      const checks = (report.checks || [])
+        .map((check) => `${check.name}${check.ok ? "✔" : "✘"}（${check.detail}）`)
+        .join("；");
+      el("probeMsg").textContent = `${report.message}｜${checks}`;
+      el("probeMsg").className = report.ok ? "msg ok" : "msg bad";
+    } catch (error) {
+      el("probeMsg").textContent = `自检失败：${error.message}`;
+      el("probeMsg").className = "msg bad";
+    }
+  });
 
   el("toggleSettings").addEventListener("click", () => {
     const box = el("settings");

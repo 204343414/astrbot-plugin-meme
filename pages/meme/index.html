@@ -19,6 +19,7 @@
         </select>
         <button id="refresh" class="ghost">刷新</button>
         <button id="toggleSettings" class="ghost">调参</button>
+        <button id="toggleBans" class="ghost">禁止投稿</button>
       </div>
     </header>
 
@@ -91,6 +92,19 @@
           <option value="disabled">只停用</option>
         </select>
       </div>
+    </section>
+
+    <section id="bans" class="settings hidden" aria-label="禁止投稿">
+      <div class="settings-head">
+        <h2>禁止投稿的人</h2>
+        <span class="msg">恶意投稿被拉黑后，他不会再有投稿权；正常聊天不受影响。</span>
+      </div>
+      <div id="banList" class="ban-list"></div>
+      <div class="settings-foot">
+        <button id="cardProbe" class="ghost">自检卡片图</button>
+        <span id="probeMsg" class="msg" aria-live="polite"></span>
+      </div>
+      <p id="cardInfo" class="msg"></p>
     </section>
 
     <section id="grid" class="grid" aria-live="polite"></section>

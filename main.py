@@ -1524,6 +1524,14 @@ class MemePlugin(Star):
             "dataDir": self.data_dir,
         }
         page["groups"] = await asyncio.to_thread(self._known_groups)
+        page["blacklist"] = await asyncio.to_thread(self.store.list_blacklist, 20)
+        page["card"] = {
+            "enabled": self._card_enabled(),
+            "showAgain": self._show_again(),
+            "showHowto": self._show_howto(),
+            "materialKeep": self._cfg_int("card_material_keep", CARD_MATERIAL_KEEP),
+            "materials": len(await asyncio.to_thread(self.store.card_material_ids)),
+        }
         return page
 
     def _known_groups(self) -> list[dict]:
@@ -1809,6 +1817,17 @@ class MemePlugin(Star):
             else "卡片带图这条路暂时不通，会降级成「图片 + 无图卡片」，按钮照常"
         )
         return report
+
+    async def web_unban(self, sender_id: str) -> dict:
+        """恢复某人的投稿权限（页面上的「解禁」）。"""
+        sender = str(sender_id or "").strip()
+        if not sender:
+            return {"ok": False, "message": "没给用户 ID"}
+        removed = await asyncio.to_thread(self.store.remove_blacklist, sender)
+        if not removed:
+            return {"ok": False, "message": f"{sender} 不在黑名单里"}
+        logger.info("[Meme] 已恢复 %s 的投稿权限（来自页面）", sender)
+        return {"ok": True, "message": f"已恢复 {sender} 的投稿权限"}
 
     async def web_delete(self, raw_id: str) -> dict:
         try:

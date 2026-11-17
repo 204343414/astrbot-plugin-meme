@@ -223,6 +223,17 @@ input[type="search"], select {
 .drop-hint { margin: 4px 0 0; font-size: 11px; color: var(--muted); }
 .dropzone.hot { border-color: var(--accent); background: var(--accent-soft); }
 
+/* 禁止投稿名单 */
+.ban-list { display: flex; flex-direction: column; gap: 6px; }
+.ban-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px;
+  font-size: 12px; background: var(--panel-2);
+}
+.ban-row .who { color: var(--text); }
+.ban-row .why { color: var(--muted); }
+.ban-row button { padding: 4px 10px; font-size: 12px; }
+
 /* 页面内确认框（沙盒 iframe 里 window.confirm 是失效的） */
 .confirm-body { max-width: min(460px, 100%); gap: 16px; }
 .confirm-text { margin: 0; font-size: 14px; line-height: 1.6; }

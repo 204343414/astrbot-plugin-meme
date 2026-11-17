@@ -460,3 +460,32 @@ def test_fetch_url_rejects_non_image(env, monkeypatch):
     )
     assert payload["status"] == "error"
     assert "不是图片" in payload["message"]
+
+
+# --- 拉黑名单（页面） ---------------------------------------------------
+
+def test_state_exposes_blacklist_and_card_info(env):
+    env["plugin"].store.add_blacklist("U9", origin="g", reason="露骨色情")
+    data = state(env)
+    assert [entry["sender_id"] for entry in data["blacklist"]] == ["U9"]
+    assert data["card"]["enabled"] is True
+    assert data["card"]["materialKeep"] >= 5
+
+
+def test_unban_route_restores_submission(env):
+    env["plugin"].store.add_blacklist("U9", reason="露骨色情")
+    data = data_of(request(env, "post", "/astrbot_plugin_meme/ui/unban", json_body={"id": "U9"}))
+    assert data["ok"] is True
+    assert env["plugin"].store.is_blacklisted("U9") is False
+
+
+def test_unban_unknown_user_is_an_error(env):
+    payload = payload_of(request(env, "post", "/astrbot_plugin_meme/ui/unban", json_body={"id": "nobody"}))
+    assert payload["status"] == "error"
+    assert "不在黑名单" in payload["message"]
+
+
+def test_card_probe_route_registered(env):
+    routes = [route for route, *_ in env["context"].route_table]
+    assert "/astrbot_plugin_meme/ui/card_probe" in routes
+    assert "/astrbot_plugin_meme/ui/fetch_url" in routes

@@ -135,6 +135,7 @@ class MemeWebUI:
             ("options", self.options_router, ["GET", "POST"], "上传选项（免审/可见范围）"),
             ("config", self.config_router, ["GET", "POST"], "读取/保存可调参数"),
             ("card_probe", self.card_probe, ["POST"], "自检：卡片图能不能进 QQ 素材库"),
+            ("unban", self.unban, ["POST"], "恢复某人的投稿权限"),
         ]
         for name, handler, methods, desc in table:
             route = f"{ROUTE_PREFIX}/{name}"
@@ -261,6 +262,13 @@ class MemeWebUI:
             )
             return _ok(result)
         return _ok(self.plugin.web_upload_options())
+
+    async def unban(self) -> Any:
+        payload = await _read_json()
+        result = await self.plugin.web_unban(str(payload.get("id", "") or ""))
+        if result.get("ok"):
+            return _ok(result)
+        return _error(str(result.get("message", "解禁失败")))
 
     async def card_probe(self) -> Any:
         """自检：上传一张内置图到 QQ 素材库，然后立刻删掉。
