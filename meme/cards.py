@@ -135,26 +135,36 @@ def build_meme_card(
     height: int = MAX_SIDE,
     note: str = "",
     auto_note: str = "",
+    bare: bool = False,
 ) -> dict[str, Any]:
     """一张卡片。
 
     ``image_url`` 为空时发**无图卡片**：图会由调用方紧跟一条图片消息补上
     （素材库和图床都不可用时的兜底，比"发不出图"强）。
+
+    ``bare=True`` 是**只留图 + 按钮**：没有编号、没有图注、没有使用次数。
+    用户明确要求自动推送用这个样式 —— 群友看到的就是"一张图下面三个按钮"，
+    和真人发图的观感一致；编号、说明这类内部信息只在手动 ``/meme`` 时出现。
     """
     blocks: list[str] = []
     if image_url:
         blocks.append(image_markdown(image_url, width, height))
-    head = f"**#{item.id}**"
-    line = caption_line(item, caption_limit)
-    if line:
-        head += f" {line}"
-    blocks.append(head)
-    if item.used_count:
-        blocks.append(f"<font color='grey'>发过 {item.used_count} 次</font>")
-    if auto_note:
-        blocks.append(f"<font color='grey'>{auto_note}</font>")
-    if note:
-        blocks.append(note)
+    if not bare:
+        head = f"**#{item.id}**"
+        line = caption_line(item, caption_limit)
+        if line:
+            head += f" {line}"
+        blocks.append(head)
+        if item.used_count:
+            blocks.append(f"<font color='grey'>发过 {item.used_count} 次</font>")
+        if auto_note:
+            blocks.append(f"<font color='grey'>{auto_note}</font>")
+        if note:
+            blocks.append(note)
+    elif not image_url:
+        # 无图 + bare：正文不能是空字符串（QQ 会认为是空卡片直接拒发），
+        # 给一个零宽的占位符，视觉上等于没有。
+        blocks.append("\u200b")
     return {
         "markdown": "\n".join(blocks),
         "rows": _buttons(show_again, show_howto, auto),

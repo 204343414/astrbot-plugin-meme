@@ -457,3 +457,43 @@ def test_every_card_stays_clickable_for_a_day():
         assert card["ttl_seconds"] == CARD_TTL_SECONDS
     card = build_auto_done_card("high", 50)
     assert [b["action_id"] for b in card["rows"][0]][-1] == ACTION_AUTO_OFF
+
+
+def test_auto_push_card_is_image_and_buttons_only():
+    """用户点名要求：自动推送的卡片不要正文、不要编号，只要图和按钮，
+    看起来跟群友自己发的一张图一样。"""
+    from meme_plugin_under_test.meme.cards import build_meme_card
+
+    item = MemeItem(id=41, file_path="/tmp/a.jpg", mime="image/jpeg",
+                    caption="免疫系统", used_count=3)
+    card = build_meme_card(
+        item,
+        "qqbot-media://image/v1/abc",
+        auto_note="当前为 每日自动推送中...",
+        bare=True,
+    )
+    text = card["markdown"]
+    assert "![梗图" in text                      # 图还在
+    assert "#41" not in text                     # 编号不再露出来
+    assert "免疫系统" not in text                # 图注也不带
+    assert "发过 3 次" not in text
+    assert "每日自动推送中" not in text          # 那行灰字一起去掉
+    assert [b["label"] for b in card["rows"][0]][:2] == ["再来一张", "我要投稿"]
+
+
+def test_manual_card_still_shows_the_id():
+    """手动 /meme 那种卡片照旧带编号和图注（群里报编号删图要用）。"""
+    from meme_plugin_under_test.meme.cards import build_meme_card
+
+    item = MemeItem(id=41, file_path="/tmp/a.jpg", mime="image/jpeg", caption="免疫系统")
+    text = build_meme_card(item, "qqbot-media://image/v1/abc")["markdown"]
+    assert "#41" in text and "免疫系统" in text
+
+
+def test_bare_card_without_image_is_never_an_empty_markdown():
+    """无图兜底时正文不能是空字符串（QQ 会当成空卡片拒发）。"""
+    from meme_plugin_under_test.meme.cards import build_meme_card
+
+    item = MemeItem(id=7, file_path="/tmp/a.jpg", mime="image/jpeg")
+    text = build_meme_card(item, "", bare=True)["markdown"]
+    assert text.strip() != ""

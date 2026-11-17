@@ -178,7 +178,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.6.1",
+    "0.6.2",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -1053,6 +1053,9 @@ class MemePlugin(Star):
                 width=width,
                 height=height,
                 auto_note=auto_note,
+                # 自动推送只发「图 + 按钮」：不要编号/图注/使用次数，
+                # 看起来就是群友随手发的一张图（用户明确要求）。
+                bare=bool(auto_note),
             )
             try:
                 await self._send_hub_card(origin, card, context=context, msg_id=msg_id)
@@ -1289,7 +1292,10 @@ class MemePlugin(Star):
                         show_again=self._show_again(), show_howto=self._show_howto(),
                         auto=self._auto_button(origin),
                         auto_note=auto_note,
-                        note="<font color='grey'>（这张图走的是降级发送，按钮照常可用）</font>",
+                        # 降级路径同样只留按钮：图已经单独发了一条，卡片再写一遍
+                        # 编号/图注就成了「图、图、一堆字」三连。
+                        bare=bool(auto_note),
+                        note="" if auto_note else "<font color='grey'>（这张图走的是降级发送，按钮照常可用）</font>",
                     ),
                     context=context,
                     msg_id=msg_id,
