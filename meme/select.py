@@ -1,7 +1,7 @@
 """从候选池里挑一张：先按来源权重抽来源，再在该来源里优先发没发过的。
 
-「越来越聪明」在这个功能里只有一种落地方式：同一个群少发重复的。所以
-挑选顺序是 未发过 → 最久没发 → 随机，而不是纯 random.choice。
+「越来越聪明」在这个功能里只有一种落地方式：少发重复的。所以挑选顺序是
+未发过 → 最久没发 → 随机，而不是纯 random.choice。
 """
 from __future__ import annotations
 
@@ -56,12 +56,12 @@ def pick_meme(
 def format_stats(
     total: int,
     by_origin: Mapping[str, int],
-    group_total: int,
+    active: int,
     rejected: int,
     pending: int = 0,
 ) -> str:
-    """``/meme 库`` 的回话。数字要能一眼看出「这个群到底有没有图可用」。"""
-    lines = [f"本群可用：{group_total} 张（全库 {total} 张）"]
+    """``/meme 库`` 的回话。数字要能一眼看出「到底有没有图可发」。"""
+    lines = [f"库里能发：{active} 张（含下架过的共 {total} 张）"]
     if by_origin:
         detail = "、".join(f"{name} {count}" for name, count in sorted(by_origin.items()))
         lines.append(f"来源：{detail}")
@@ -69,6 +69,6 @@ def format_stats(
         lines.append(f"已拒收 {rejected} 张（同一张图不会再重复送审）")
     if pending:
         lines.append(f"待审核 {pending} 张")
-    if group_total == 0:
-        lines.append("还没有可发的图：发一张图并附上 /meme 收 就能投稿。")
+    if active == 0:
+        lines.append("还没有可发的图：引用一张图、@我，然后打「/meme 投稿」。")
     return "\n".join(lines)

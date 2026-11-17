@@ -209,3 +209,69 @@ def test_json_source_keeps_the_proxy():
 
     source = JsonApiImageSource("https://x/api", "data.url", proxy="http://p:1")
     assert source.proxy == "http://p:1"
+
+
+# --- 重画尺寸自适应 ---------------------------------------------------------
+
+def _png(width: int, height: int) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (10, 20, 30)).save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def test_generator_asks_for_a_canvas_matching_the_source():
+    """横图要按横幅画（1536x1024），不能一律 1024x1024。"""
+    generator = OpenAIImageGenerator(
+        Credentials(api_base="https://x/v1", api_key="k", model="gpt-image-2")
+    )
+    seen = {}
+
+    async def fake_edit(data, prompt, size=""):
+        seen["size"] = size
+        return _png(1536, 1024)
+
+    generator.edit = fake_edit
+    out = asyncio.run(generator(_png(1920, 1080), "翻译成中文"))
+    assert seen["size"] == "1536x1024"
+    from meme.draw import image_size
+
+    width, height = image_size(out)
+    assert abs(width / height - 1920 / 1080) < 0.02  # 画完裁回原比例
+
+
+def test_generator_honours_an_explicit_size():
+    generator = OpenAIImageGenerator(
+        Credentials(api_base="https://x/v1", api_key="k", model="m"), size="1024x1024"
+    )
+    seen = {}
+
+    async def fake_edit(data, prompt, size=""):
+        seen["size"] = size
+        return _png(1024, 1024)
+
+    generator.edit = fake_edit
+    asyncio.run(generator(_png(1920, 1080), "p"))
+    assert seen["size"] == "1024x1024"
+
+
+def test_generator_falls_back_to_generations_with_the_same_canvas():
+    generator = OpenAIImageGenerator(
+        Credentials(api_base="https://x/v1", api_key="k", model="m")
+    )
+    seen = {}
+
+    async def boom(data, prompt, size=""):
+        raise RuntimeError("edits 不支持")
+
+    async def fake_generate(prompt, size=""):
+        seen["size"] = size
+        return _png(1024, 1536)
+
+    generator.edit = boom
+    generator.generate = fake_generate
+    asyncio.run(generator(_png(900, 1600), "p"))
+    assert seen["size"] == "1024x1536"

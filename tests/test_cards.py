@@ -20,7 +20,7 @@ from meme.cards import (
     display_size,
     image_markdown,
 )
-from meme.models import SCOPE_GLOBAL, MemeItem
+from meme.models import MemeItem
 
 Image = pytest.importorskip("PIL.Image")
 
@@ -30,7 +30,6 @@ def item(**kwargs) -> MemeItem:
         id=12,
         sha256="a" * 64,
         origin="submitted",
-        scope=SCOPE_GLOBAL,
         file_path="/tmp/x.jpg",
         caption="when the code works",
         caption_zh="当代码跑通的时候",
@@ -110,7 +109,7 @@ def test_caption_limit_applies():
 def test_howto_card_teaches_the_exact_command():
     card = build_howto_card()
     assert "/meme 投稿" in card["markdown"]
-    assert "引用" in card["markdown"] and "别的群也能刷到" in card["markdown"]
+    assert "引用" in card["markdown"] and "所有群共用同一份" in card["markdown"]
     assert [b["action_id"] for b in rows_of(card)] == [ACTION_AGAIN]
 
 

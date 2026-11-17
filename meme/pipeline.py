@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import os
 from typing import Awaitable, Callable
 
 from .chinese import (
@@ -24,7 +23,7 @@ from .chinese import (
     needs_translation,
 )
 from .media import ext_for_mime, human_size, sha256_of, sniff_image, to_data_url
-from .models import SCOPE_GROUP, IngestResult, MemeItem, Review
+from .models import IngestResult, MemeItem, Review
 from .review import ReviewPolicy, judge, parse_review
 from .store import MemeStore
 
@@ -54,7 +53,6 @@ class MemePipeline:
         translator: Translator | None = None,
         redrawer: Redrawer | None = None,
         caption_mode: str = MODE_APPEND,
-        default_scope: str = SCOPE_GROUP,
         max_bytes: int = 8 * 1024 * 1024,
         redraw_recheck: bool = True,
         caption_limit: int = 160,
@@ -65,7 +63,6 @@ class MemePipeline:
         self.translator = translator
         self.redrawer = redrawer
         self.caption_mode = caption_mode
-        self.default_scope = default_scope
         self.max_bytes = max_bytes
         self.redraw_recheck = redraw_recheck
         self.caption_limit = caption_limit
@@ -97,8 +94,6 @@ class MemePipeline:
         *,
         origin: str = "submitted",
         contributor: str = "",
-        group_id: str = "",
-        scope: str = "",
         source_url: str = "",
         tags: tuple[str, ...] = (),
     ) -> IngestResult:
@@ -170,8 +165,6 @@ class MemePipeline:
             sha256=sha256,
             file_path=path,
             origin=origin,
-            scope=scope or self.default_scope,
-            group_id=group_id,
             mime=mime,
             caption=caption,
             caption_zh=caption_zh,
@@ -229,46 +222,5 @@ class MemePipeline:
 
     # --- 选图 -------------------------------------------------------------
 
-    def pick(self, group_id: str, weights: dict, rng=None) -> MemeItem | None:
-        return self.store.pick(group_id, weights, rng)
-
-
-def seed_bundled(store: MemeStore, bundled_dir: str, tags: tuple[str, ...] = ("内置",)) -> int:
-    """把 ``assets/bundled`` 里的种子图登记进库（已存在就跳过）。
-
-    内置图是我们自己放进去的、上线前人工看过，因此不再花一次审核的钱。
-    文件名（去掉后缀）会当成图注，方便 ``/meme 库`` 里认人。
-    """
-    if not bundled_dir or not os.path.isdir(bundled_dir):
-        return 0
-    added = 0
-    for name in sorted(os.listdir(bundled_dir)):
-        path = os.path.join(bundled_dir, name)
-        if not os.path.isfile(path):
-            continue
-        try:
-            with open(path, "rb") as fh:
-                data = fh.read()
-        except OSError:
-            continue
-        sniffed = sniff_image(data)
-        if sniffed is None:
-            continue
-        mime, ext = sniffed
-        sha256 = sha256_of(data)
-        if store.by_sha(sha256) is not None:
-            continue
-        stem = os.path.splitext(name)[0]
-        stored = store.save_media(sha256, data, ext)
-        _meme_id, created = store.add(
-            sha256=sha256,
-            file_path=stored,
-            origin="bundled",
-            scope="global",
-            mime=mime,
-            caption=stem if not stem.isascii() else "",
-            tags=tags,
-        )
-        if created:
-            added += 1
-    return added
+    def pick(self, weights: dict, rng=None) -> MemeItem | None:
+        return self.store.pick(weights, rng)

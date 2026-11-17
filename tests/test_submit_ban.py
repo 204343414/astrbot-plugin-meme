@@ -8,13 +8,13 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 import io
 import json
 
 import pytest
 
 from meme.chinese import MODE_APPEND
-from meme.models import SCOPE_GLOBAL, SCOPE_GROUP
 from meme.pipeline import MemePipeline
 from meme.review import ReviewPolicy
 
@@ -58,7 +58,9 @@ class FakeTranslator:
 
 
 class FakeComponent:
-    """冒充 astrbot 的 Image 组件：只要插件能从中拿到字节就行。"""
+    """冒充 astrbot 的 Image 组件：只要插件能认出它是图、并能拿到字节就行。"""
+
+    type = "Image"
 
     def __init__(self, data: bytes):
         self.data = data
@@ -141,10 +143,10 @@ async def _component_bytes(component, timeout: float = 20.0) -> bytes:
 
 
 def submit(instance, event):
+    """完整走一遍命令入口（分发也在测：删掉「收」之后不该再有第二个入口）。"""
     async def run():
-        return [result async for result in instance._do_submit(
-            event, event._images, public=event.message_str.endswith("投稿")
-        )]
+        event.message_obj = SimpleNamespace(message=list(event._images))
+        return [result async for result in instance.meme_entry(event)]
 
     return asyncio.run(run())
 
@@ -155,30 +157,31 @@ def text_of(results) -> str:
 
 # --- 投稿去向 ---------------------------------------------------------------
 
-def test_public_submit_goes_into_shared_library(plugin):
+def test_submit_goes_into_the_shared_library(plugin):
     instance, _context, moderator = plugin
     event = FakeEvent(images=[FakeComponent(jpeg_bytes())])
     submit(instance, event)
     assert moderator.calls == 1
     item = instance.store.recent(limit=10)[0]
-    assert item.scope == SCOPE_GLOBAL
-    assert "别的群也刷得到" in text_of(event.results)
+    assert item.origin == "submitted"
+    assert "已入库" in text_of(event.results)
 
 
-def test_plain_submit_keeps_group_scope(plugin):
+def test_old_shou_command_no_longer_submits(plugin):
+    """「/meme 收」这个写法已经删了：图库只有一份，不再有第二个入口。"""
     instance, _context, _moderator = plugin
     event = FakeEvent(text="/meme 收", images=[FakeComponent(jpeg_bytes((1, 2, 3)))])
     submit(instance, event)
-    item = instance.store.recent(limit=10)[0]
-    assert item.scope == SCOPE_GROUP
+    assert instance.store.recent(limit=10) == []
 
 
-def test_public_scope_is_configurable(plugin):
+def test_bare_image_without_subcommand_only_hints(plugin):
+    """带图但没写子命令：不入库，只回一句怎么写。"""
     instance, _context, _moderator = plugin
-    instance.config["submit_command_scope"] = SCOPE_GROUP
-    event = FakeEvent(images=[FakeComponent(jpeg_bytes())])
+    event = FakeEvent(text="", images=[FakeComponent(jpeg_bytes())])
     submit(instance, event)
-    assert instance.store.recent(limit=10)[0].scope == SCOPE_GROUP
+    assert instance.store.recent(limit=10) == []
+    assert "/meme 投稿" in text_of(event.results)
 
 
 def test_submit_without_image_teaches_the_flow(plugin):
@@ -276,8 +279,8 @@ class FakeButtonContext:
 def test_again_button_sends_a_card(plugin):
     instance, _context, _moderator = plugin
     instance.store.add(
-        sha256="b" * 64, file_path="/tmp/none.jpg", origin="bundled",
-        scope=SCOPE_GLOBAL, mime="image/jpeg", caption="绷不住了",
+        sha256="b" * 64, file_path="/tmp/none.jpg", origin="submitted",
+        mime="image/jpeg", caption="绷不住了",
     )
     calls = []
 
@@ -295,8 +298,8 @@ def test_again_button_respects_cooldown(plugin):
     instance, _context, _moderator = plugin
     instance.config["cooldown_seconds"] = 60
     instance.store.add(
-        sha256="c" * 64, file_path="/tmp/none.jpg", origin="bundled",
-        scope=SCOPE_GLOBAL, mime="image/jpeg",
+        sha256="c" * 64, file_path="/tmp/none.jpg", origin="submitted",
+        mime="image/jpeg",
     )
     called = []
 

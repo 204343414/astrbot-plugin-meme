@@ -14,6 +14,8 @@ from typing import Any
 
 import httpx
 
+from .draw import choose_draw_size, fit_to_reference, image_size
+
 logger = logging.getLogger(__name__)
 
 #: httpx 0.26 起 ``proxy`` 单数，之前叫 ``proxies``。容器里两种都可能。
@@ -190,13 +192,17 @@ class OpenAIImageGenerator:
     先走 ``/images/edits``（给原图 + 提示词，画图模型才知道「改这一张」），
     失败再退 ``/images/generations``（纯提示词，画面会变，但至少有中文版），
     两条都挂就抛异常，由管线退回字幕模式。
+
+    尺寸**不写死**：``size="auto"`` 时每次拿原图的宽高比去挑画布（横图用
+    1536x1024、竖图用 1024x1536、接近方形才用 1024x1024），画完再裁回原图
+    比例。写死方形会让横幅梗图被模型重新构图，中文化变成「重画一张」。
     """
 
     def __init__(
         self,
         credentials: Credentials,
         *,
-        size: str = "1024x1024",
+        size: str = "auto",
         quality: str = "",
         timeout: float = 120.0,
         use_generations_fallback: bool = True,
@@ -215,8 +221,8 @@ class OpenAIImageGenerator:
     def _url(self, endpoint: str) -> str:
         return f"{normalize_openai_base(self.credentials.api_base)}/{endpoint}"
 
-    async def edit(self, data: bytes, prompt: str) -> bytes:
-        form = {"model": self.credentials.model, "prompt": prompt, "size": self.size}
+    async def edit(self, data: bytes, prompt: str, size: str = "") -> bytes:
+        form = {"model": self.credentials.model, "prompt": prompt, "size": size or self.size}
         if self.quality:
             form["quality"] = self.quality
         files = {"image": ("meme.png", data, "image/png")}
@@ -227,8 +233,13 @@ class OpenAIImageGenerator:
         response.raise_for_status()
         return parse_image_response(response.json())
 
-    async def generate(self, prompt: str) -> bytes:
-        body = {"model": self.credentials.model, "prompt": prompt, "size": self.size, "n": 1}
+    async def generate(self, prompt: str, size: str = "") -> bytes:
+        body = {
+            "model": self.credentials.model,
+            "prompt": prompt,
+            "size": size or self.size,
+            "n": 1,
+        }
         if self.quality:
             body["quality"] = self.quality
         async with _build_client(self.timeout, self.proxy) as client:
@@ -243,19 +254,26 @@ class OpenAIImageGenerator:
             raise RuntimeError("画图 Provider 没配好（缺 API 地址或密钥）")
         if not self.credentials.model:
             raise RuntimeError("没填重绘模型名")
+        width, height = image_size(data)
+        size = choose_draw_size(width, height, self.size)
+        logger.info(
+            "[Meme] 重画尺寸：原图 %sx%s → %s", width or "?", height or "?", size
+        )
+        image = b""
         try:
-            image = await self.edit(data, prompt)
-            if image:
-                return image
-            logger.info("[Meme] images/edits 没返回图，改试 generations")
+            image = await self.edit(data, prompt, size=size)
+            if not image:
+                logger.info("[Meme] images/edits 没返回图，改试 generations")
         except Exception as exc:  # noqa: BLE001
             logger.info("[Meme] images/edits 不可用（%s），改试 generations", exc)
             if not self.use_generations_fallback:
                 raise
-        image = await self.generate(prompt)
+        if not image:
+            image = await self.generate(prompt, size=size)
         if not image:
             raise RuntimeError("画图接口没有返回图片")
-        return image
+        # 模型不太可能正好画成原图比例，这里掰回来
+        return fit_to_reference(image, width, height)
 
 
 # --- HTTP 抓取 --------------------------------------------------------------

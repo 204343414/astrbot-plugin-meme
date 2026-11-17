@@ -16,17 +16,17 @@ from meme.gallery import (
 from meme.models import MemeItem
 
 
-def item(meme_id, *, origin="submitted", scope="group", status="active", caption="",
+def item(meme_id, *, origin="submitted", status="active", caption="",
          caption_zh="", tags=(), used_count=0, used_at=0.0):
     return MemeItem(
-        id=meme_id, origin=origin, scope=scope, status=status, caption=caption,
+        id=meme_id, origin=origin, status=status, caption=caption,
         caption_zh=caption_zh, tags=tuple(tags), used_count=used_count,
         used_at=used_at, file_path=f"/tmp/{meme_id}.jpg",
     )
 
 
 def test_origin_labels():
-    assert origin_label("bundled") == "内置"
+    assert origin_label("submitted") == "投稿"
     assert origin_label("submitted") == "投稿"
     assert origin_label("api") == "接口"
     assert origin_label("weird") == "weird"
@@ -41,7 +41,7 @@ def test_query_matches_caption_and_id_and_contributor():
 
 
 def test_query_matches_origin_label():
-    assert matches_query(item(1, origin="bundled"), "内置")
+    assert matches_query(item(1, origin="submitted"), "投稿")
 
 
 def test_empty_query_matches_everything():
@@ -50,13 +50,14 @@ def test_empty_query_matches_everything():
 
 def test_filter_by_origin_status_and_query():
     entries = [
-        item(1, origin="bundled"),
+        item(1, origin="submitted"),
         item(2, origin="submitted", caption="猫"),
         item(3, origin="submitted", status="disabled", caption="狗"),
     ]
-    assert [e.id for e in filter_items(entries, origin="submitted")] == [2, 3]
+    assert [e.id for e in filter_items(entries, origin="submitted")] == [1, 2, 3]
     assert [e.id for e in filter_items(entries, status="active")] == [1, 2]
     assert [e.id for e in filter_items(entries, query="猫")] == [2]
+    assert [e.id for e in filter_items(entries, origin="api")] == []
     assert [e.id for e in filter_items(entries, origin="all", status="all")] == [1, 2, 3]
 
 
@@ -75,10 +76,9 @@ def test_sort_warm_is_most_used_first():
 
 
 def test_build_card_carries_labels_and_flags():
-    card = build_card(item(7, origin="bundled", scope="global", used_count=3), "data:x")
+    card = build_card(item(7, origin="submitted", used_count=3), "data:x")
     assert card["id"] == 7
-    assert card["originLabel"] == "内置"
-    assert card["scopeLabel"] == "全局"
+    assert card["originLabel"] == "投稿"
     assert card["active"] is True
     assert card["thumb"] == "data:x"
     assert card["usedCount"] == 3
@@ -93,7 +93,7 @@ def test_build_card_marks_disabled_and_missing_files():
 def test_build_gallery_paginates():
     entries = [item(i) for i in range(1, 11)]
     page = build_gallery(
-        entries, total=11, stats={"total": 11, "group_total": 11, "rejected": 2},
+        entries, total=11, stats={"total": 11, "active": 10, "rejected": 2},
         thumb_of=lambda _e: "", limit=4, offset=0,
     )
     assert [card["id"] for card in page["cards"]] == [1, 2, 3, 4]
@@ -117,7 +117,7 @@ def test_build_gallery_clamps_limit():
 
 
 def test_build_origin_breakdown_sorted_by_count():
-    entries = [item(1, origin="bundled"), item(2, origin="submitted"), item(3, origin="submitted")]
+    entries = [item(1, origin="api"), item(2, origin="submitted"), item(3, origin="submitted")]
     breakdown = build_origin_breakdown(entries)
     assert breakdown[0] == {"origin": "submitted", "label": "投稿", "count": 2}
     assert breakdown[1]["count"] == 1

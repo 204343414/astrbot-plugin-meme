@@ -160,7 +160,6 @@ class MemeWebUI:
                 query=str(args.get("q") or ""),
                 sort=str(args.get("sort") or ""),
                 status=str(args.get("status") or ""),
-                group_id=str(args.get("group_id") or ""),
                 limit=int(args.get("limit") or 24),
                 offset=int(args.get("offset") or 0),
             )
@@ -202,7 +201,6 @@ class MemeWebUI:
             result = await self.plugin.web_upload(
                 data,
                 filename,
-                scope=str(payload.get("scope", "") or ""),
                 skip_review=payload.get("skip_review"),
             )
         except Exception as exc:  # noqa: BLE001
@@ -220,7 +218,6 @@ class MemeWebUI:
         try:
             result = await self.plugin.web_fetch_url(
                 str(payload.get("url", "") or ""),
-                scope=str(payload.get("scope", "") or ""),
                 skip_review=payload.get("skip_review"),
             )
         except Exception as exc:  # noqa: BLE001
@@ -257,7 +254,6 @@ class MemeWebUI:
         if await _current_method() == "POST":
             payload = await _read_json()
             result = await self.plugin.web_set_upload_options(
-                scope=str(payload.get("scope", "") or ""),
                 skip_review=payload.get("skip_review"),
             )
             return _ok(result)
@@ -271,7 +267,7 @@ class MemeWebUI:
         return _error(str(result.get("message", "解禁失败")))
 
     async def card_probe(self) -> Any:
-        """自检：上传一张内置图到 QQ 素材库，然后立刻删掉。
+        """自检：上传一张现做的测试图到 QQ 素材库，然后立刻删掉。
 
         卡片能不能显示图，取决于这条链路（素材库 / 图床）。它挂了的表现是
         「卡片发出去了但图是裂的」，非常难查 —— 所以给面板一个能一键验的入口。

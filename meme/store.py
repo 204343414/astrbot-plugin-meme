@@ -17,8 +17,6 @@ from collections.abc import Iterable
 from typing import Callable
 
 from .models import (
-    SCOPE_GLOBAL,
-    SCOPE_GROUP,
     STATUS_ACTIVE,
     MemeItem,
     Review,
@@ -30,6 +28,8 @@ CREATE TABLE IF NOT EXISTS memes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     sha256      TEXT NOT NULL UNIQUE,
     origin      TEXT NOT NULL DEFAULT 'submitted',
+    -- scope / group_id 是老「单群图」留下的列。功能已经砍掉（图库只有一份、所有群共用），
+    -- 列保留只是为了不动老库的表结构：SQLite 删列的代价远大于留两个被忽略的列。
     scope       TEXT NOT NULL DEFAULT 'group',
     group_id    TEXT NOT NULL DEFAULT '',
     file_path   TEXT NOT NULL,
@@ -185,8 +185,6 @@ class MemeStore:
         sha256: str,
         file_path: str,
         origin: str = "submitted",
-        scope: str = SCOPE_GROUP,
-        group_id: str = "",
         mime: str = "image/jpeg",
         caption: str = "",
         caption_zh: str = "",
@@ -200,17 +198,15 @@ class MemeStore:
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO memes (sha256, origin, scope, group_id, file_path, mime,
+                INSERT INTO memes (sha256, origin, file_path, mime,
                                    caption, caption_zh, tags, nsfw_level, status,
                                    contributor, source_url, created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(sha256) DO NOTHING
                 """,
                 (
                     sha256,
                     origin,
-                    scope,
-                    group_id,
                     file_path,
                     mime,
                     caption,
@@ -255,20 +251,15 @@ class MemeStore:
         params.append(int(meme_id))
         self._write(f"UPDATE memes SET {', '.join(sets)} WHERE id = ?", params)
 
-    def random_pool(self, group_id: str = "") -> list[MemeItem]:
-        """本群能发的所有图：全局图 + 本群自己的图。"""
+    def random_pool(self) -> list[MemeItem]:
+        """能发的所有图。图库只有一份，所有群看到的是同一批。"""
         rows = self._rows(
-            """
-            SELECT * FROM memes
-            WHERE status = 'active'
-              AND (scope = ? OR (scope = ? AND group_id = ?))
-            """,
-            (SCOPE_GLOBAL, SCOPE_GROUP, group_id),
+            "SELECT * FROM memes WHERE status = 'active'"
         )
         return [MemeItem.from_row(row) for row in rows]
 
-    def pick(self, group_id: str, weights: dict, rng=None) -> MemeItem | None:
-        return pick_meme(self.random_pool(group_id), weights, rng)
+    def pick(self, weights: dict, rng=None) -> MemeItem | None:
+        return pick_meme(self.random_pool(), weights, rng)
 
     def mark_used(self, meme_id: int) -> None:
         self._write(
@@ -276,35 +267,24 @@ class MemeStore:
             (self.now(), int(meme_id)),
         )
 
-    def recent(self, limit: int = 10, group_id: str = "") -> list[MemeItem]:
-        if group_id:
-            rows = self._rows(
-                """SELECT * FROM memes
-                   WHERE scope = ? OR (scope = ? AND group_id = ?)
-                   ORDER BY id DESC LIMIT ?""",
-                (SCOPE_GLOBAL, SCOPE_GROUP, group_id, int(limit)),
-            )
-        else:
-            rows = self._rows(
-                "SELECT * FROM memes ORDER BY id DESC LIMIT ?", (int(limit),)
-            )
+    def recent(self, limit: int = 10) -> list[MemeItem]:
+        rows = self._rows(
+            "SELECT * FROM memes ORDER BY id DESC LIMIT ?", (int(limit),)
+        )
         return [MemeItem.from_row(row) for row in rows]
 
-    def stats(self, group_id: str = "") -> dict:
+    def stats(self) -> dict:
         total = self._rows("SELECT COUNT(*) AS n FROM memes")[0]["n"]
-        group_total = self._rows(
-            """SELECT COUNT(*) AS n FROM memes
-               WHERE status = 'active'
-                 AND (scope = ? OR (scope = ? AND group_id = ?))""",
-            (SCOPE_GLOBAL, SCOPE_GROUP, group_id),
+        active = self._rows(
+            "SELECT COUNT(*) AS n FROM memes WHERE status = 'active'"
         )[0]["n"]
         by_origin_rows = self._rows(
-            "SELECT origin, COUNT(*) AS n FROM memes GROUP BY origin"
+            "SELECT origin, COUNT(*) AS n FROM memes WHERE status = 'active' GROUP BY origin"
         )
         rejected = self._rows("SELECT COUNT(*) AS n FROM rejects")[0]["n"]
         return {
             "total": int(total),
-            "group_total": int(group_total),
+            "active": int(active),
             "by_origin": {row["origin"]: int(row["n"]) for row in by_origin_rows},
             "rejected": int(rejected),
         }

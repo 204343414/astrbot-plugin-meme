@@ -118,3 +118,21 @@ def test_flag_choices_match_review_known_flags():
     from meme.review import KNOWN_FLAGS
 
     assert {name for name, _label in FLAG_CHOICES} == set(KNOWN_FLAGS)
+
+
+def test_dead_keys_are_gone_from_the_settings_page():
+    """「单群图库 / 内置图」相关的配置项已经删了，页面上不该还挂着。"""
+    from meme.settings import FIELD_BY_KEY
+
+    for key in ("submission_scope", "submit_command_scope", "weight_bundled"):
+        assert key not in FIELD_BY_KEY
+    assert "redraw_size" in FIELD_BY_KEY
+
+
+def test_redraw_size_only_accepts_known_sizes():
+    from meme.settings import coerce
+
+    assert coerce("redraw_size", "auto") == ("auto", "")
+    assert coerce("redraw_size", "1536x1024") == ("1536x1024", "")
+    value, error = coerce("redraw_size", "9999x9999")
+    assert value is None and "redraw_size" not in error

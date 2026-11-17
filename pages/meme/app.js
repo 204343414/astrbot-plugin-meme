@@ -7,8 +7,6 @@ const bridge = window.AstrBotPluginPage || window.AstrBotPluginView;
 const el = (id) => document.getElementById(id);
 
 const state = {
-  groups: [],
-  groupId: "",
   origin: "all",
   q: "",
   sort: "new",
@@ -19,8 +17,8 @@ const state = {
   settings: null,
 };
 
-const ORIGIN_ORDER = ["all", "bundled", "submitted", "api", "generated"];
-const ORIGIN_FALLBACK = { all: "全部", bundled: "内置", submitted: "投稿", api: "接口", generated: "AI 现画" };
+const ORIGIN_ORDER = ["all", "submitted", "api", "generated"];
+const ORIGIN_FALLBACK = { all: "全部", submitted: "投稿", api: "接口", generated: "AI 现画" };
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({
@@ -68,16 +66,14 @@ async function loadState({ append = false } = {}) {
     q: state.q,
     sort: state.sort,
     status: state.status === "all" ? "" : state.status,
-    group_id: state.groupId,
     limit: state.limit,
     offset,
   });
 
   state.offset = payload.offset;
   state.cards = append ? state.cards.concat(payload.cards) : payload.cards;
-  state.groups = payload.groups || [];
 
-  el("statGroup").textContent = payload.groupTotal;
+  el("statActive").textContent = payload.activeTotal;
   el("statTotal").textContent = payload.libraryTotal;
   el("statRejected").textContent = payload.rejected;
   el("statMode").textContent = payload.running?.captionMode || "—";
@@ -87,7 +83,6 @@ async function loadState({ append = false } = {}) {
     `数据目录 ${payload.running?.dataDir || "—"}` +
     (payload.running?.proxy ? ` · 代理 ${payload.running.proxy}` : "");
 
-  renderGroupFilter();
   renderChips(payload.origins || []);
   renderGrid();
   renderBans(payload.blacklist || []);
@@ -124,18 +119,6 @@ function renderCardInfo(card) {
     : "卡片已关（发的是纯图片）";
 }
 
-function renderGroupFilter() {
-  const select = el("groupFilter");
-  const current = state.groupId;
-  const items = ['<option value="">全部群视角</option>'];
-  state.groups.forEach((group) => {
-    const label = `${group.groupId || group.umo}${group.dailyEnabled ? " · 每日" : ""}`;
-    items.push(`<option value="${escapeHtml(group.umo)}">${escapeHtml(label)}</option>`);
-  });
-  select.innerHTML = items.join("");
-  select.value = current;
-}
-
 function renderChips(origins) {
   const counts = {};
   origins.forEach((entry) => { counts[entry.origin] = entry.count; });
@@ -158,7 +141,6 @@ function renderGrid() {
   grid.innerHTML = state.cards.map((card) => {
     const badges = [
       `<span class="badge">${escapeHtml(card.originLabel)}</span>`,
-      card.scope === "global" ? '<span class="badge">全局</span>' : "",
       card.nsfwLevel > 0 ? `<span class="badge warn">NSFW ${card.nsfwLevel}</span>` : "",
       card.active ? "" : '<span class="badge off">已停用</span>',
       card.hasFile ? "" : '<span class="badge warn">文件缺失</span>',
@@ -173,7 +155,7 @@ function renderGrid() {
         <div class="card-body">
           <div class="card-caption">${caption ? escapeHtml(caption) : "<em>（无图注）</em>"}</div>
           <div class="card-meta">
-            <span>#${card.id} · ${escapeHtml(card.scopeLabel)}</span>
+            <span>#${card.id}</span>
             <span>发过 ${card.usedCount}</span>
           </div>
           <div class="card-actions">
@@ -214,7 +196,6 @@ function closeConfirm(answer) {
 async function pushUploadOptions() {
   try {
     await apiPost("ui/options", {
-      scope: el("optScope").value,
       skip_review: el("optSkipReview").checked,
     });
   } catch (error) {
@@ -283,7 +264,6 @@ async function importUrls(urls) {
     try {
       const data = await apiPost("ui/fetch_url", {
         url,
-        scope: el("optScope").value,
         skip_review: skip,
       }) || {};
       const id = data.meme?.id ? `#${data.meme.id}` : "";
@@ -351,7 +331,6 @@ async function openDetail(id) {
   el("modalInfo").innerHTML = `
     <span>编号 #${detail.id}</span>
     <span>来源 ${escapeHtml(detail.origin)}</span>
-    <span>范围 ${escapeHtml(detail.scope)}</span>
     <span>状态 ${detail.status === "active" ? "在用" : "已停用"}</span>
     <span>NSFW ${detail.nsfwLevel}</span>
     <span>发过 ${detail.usedCount} 次</span>
@@ -521,11 +500,6 @@ function bind() {
     state.status = event.target.value;
     loadState().catch(showError);
   });
-  el("groupFilter").addEventListener("change", (event) => {
-    state.groupId = event.target.value;
-    loadState().catch(showError);
-  });
-
   el("grid").addEventListener("click", (event) => {
     const card = event.target.closest(".card");
     if (!card) return;
@@ -649,7 +623,6 @@ async function boot() {
     if (bridge?.ready) await bridge.ready();
     const options = await apiGet("ui/options");
     if (options) {
-      el("optScope").value = options.scope || "group";
       el("optSkipReview").checked = options.skipReview !== false;
     }
     await loadState();

@@ -44,8 +44,8 @@ from .meme.adapters import (
 from .meme.cards import ACTION_AGAIN, ACTION_HOWTO, build_howto_card, build_meme_card
 from .meme.chinese import MODE_APPEND, MODE_REDRAW, compose_caption
 from .meme.delivery import Attempt, deliver
-from .meme.models import SCOPE_GLOBAL, SCOPE_GROUP, MemeItem
-from .meme.pipeline import MemePipeline, seed_bundled
+from .meme.models import MemeItem
+from .meme.pipeline import MemePipeline
 from .meme.review import ReviewPolicy, build_review_prompt
 from .meme.select import format_stats
 from .meme.store import MemeStore
@@ -70,16 +70,15 @@ PUSH_BLOCK_SECONDS = 24 * 3600
 HELP_TEXT = """梗图玩法：
 /meme —— 随机来一张（也可以发「梗图」「来张梗图」）
 /meme 再来 —— 再摇一张（卡片上那个按钮的同义命令）
-引用一张图、@我，然后 /meme 投稿 —— 投稿进公共库，别的群也刷得到
-发一张图并附上 /meme 收 —— 投稿给本群（先审后收）
-/meme 库 —— 看看这个群有多少张能发
+引用一张图、@我，然后 /meme 投稿 —— 投稿进图库（所有群共用一个库）
+/meme 库 —— 看看库里现在有多少张能发
 /meme 每日 —— 看每日推送状态
 /meme 每日 9:00,21:00 —— 每天这两个点自动发一张（管理员）
 /meme 每日 关 —— 关掉自动发（管理员）
 /meme 删 <编号> —— 下架一张（管理员）
 /meme 审核 <编号> —— 重新审一次（管理员）
 /meme 拉 —— 立刻从第三方接口拉一张入库（管理员）
-/meme 测试 —— 用内置图跑一遍完整管线，看审核输出（管理员）
+/meme 测试 —— 引用一张图跑一遍完整管线，看审核输出（管理员）
 /meme 黑名单 —— 看被永久禁止投稿的人（管理员）
 /meme 解禁 <用户ID> —— 恢复某人的投稿权限（管理员）"""
 
@@ -160,7 +159,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.3.1",
+    "0.4.0",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -188,10 +187,6 @@ class MemePlugin(Star):
 
     async def initialize(self) -> None:
         self.store.init()
-        bundled_dir = os.path.join(os.path.dirname(__file__), "assets", "bundled")
-        added = await asyncio.to_thread(seed_bundled, self.store, bundled_dir)
-        if added:
-            logger.info("[Meme] 内置种子图入库 %s 张", added)
         self._ensure_scheduler()
         self._reschedule_daily()
         self._register_web()
@@ -329,7 +324,7 @@ class MemePlugin(Star):
                 )
                 redrawer = OpenAIImageGenerator(
                     creds,
-                    size=str(self.cfg.get("redraw_size", "1024x1024") or "1024x1024"),
+                    size=str(self.cfg.get("redraw_size", "") or "auto"),
                     quality=str(self.cfg.get("redraw_quality", "") or ""),
                     timeout=self._cfg_float("redraw_timeout_seconds", 120.0),
                     proxy=self._proxy(),
@@ -351,7 +346,6 @@ class MemePlugin(Star):
             translator=translator,
             redrawer=redrawer,
             caption_mode=caption_mode,
-            default_scope=str(self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP),
             max_bytes=int(self._cfg_float("max_image_mb", 8.0) * 1024 * 1024),
             redraw_recheck=bool(self.cfg.get("redraw_recheck", True)),
             caption_limit=self._cfg_int("caption_limit", 160),
@@ -359,7 +353,6 @@ class MemePlugin(Star):
 
     def _weights(self) -> dict[str, float]:
         return {
-            "bundled": self._cfg_float("weight_bundled", 1.0),
             "submitted": self._cfg_float("weight_submitted", 3.0),
             "api": self._cfg_float("weight_api", 0.5),
             "generated": self._cfg_float("weight_generated", 0.0),
@@ -459,15 +452,11 @@ class MemePlugin(Star):
         """
         origin = str(getattr(context, "origin", "") or "")
         sender = str(getattr(context, "member_openid", "") or "")
-        group_id = ""
-        parts = origin.split(":")
-        if len(parts) >= 3 and "GroupMessage" in origin:
-            group_id = parts[-1]
         wait = self._cooldown_left(origin, sender) or self._group_cooldown_left(origin)
         if wait > 0:
             # ACK 4 = 无权限：群里会看到一句「暂时不能点」的提示，而不是按钮没反应
             return 4
-        item = await asyncio.to_thread(self.pipeline.pick, group_id, self._weights())
+        item = await asyncio.to_thread(self.pipeline.pick, self._weights())
         if item is None:
             return 3
         self._touch_cooldowns(origin, sender)
@@ -679,21 +668,19 @@ class MemePlugin(Star):
                 yield result
             return
 
-        if sub in ("投稿", "submit", "public"):
-            # 卡片上教的写法：进公共库，别的群也能刷到
-            async for result in self._do_submit(event, images, public=True):
-                yield result
-            return
-
-        if sub in ("收", "收图"):
+        if sub in ("投稿", "submit"):
+            # 唯一的投稿入口。图库只有一份，不再分「本群」「公共」两种去处，
+            # 所以「/meme 收」那种老写法一起删掉了，免得两个命令行为还要解释。
             async for result in self._do_submit(event, images):
                 yield result
             return
 
         if images and not sub:
-            # 带图没写子命令，按投稿处理：少一步操作，少一堆「怎么投稿」
-            async for result in self._do_submit(event, images):
-                yield result
+            # 带了图却没写子命令：不静默入库（那会让人以为「发图就自动收」），
+            # 只回一句怎么写，省掉一轮「为什么没反应」。
+            yield event.plain_result(
+                "要投稿请打「/meme 投稿」（先把图引用上、@我）。"
+            )
             return
 
         if sub in ("删", "下架", "del", "delete"):
@@ -752,12 +739,12 @@ class MemePlugin(Star):
         if group_wait > 0:
             return event.plain_result(f"这个群刚发过，{group_wait:.0f} 秒后再点")
 
-        item = await asyncio.to_thread(self.pipeline.pick, group_id, self._weights())
+        item = await asyncio.to_thread(self.pipeline.pick, self._weights())
         if item is None and self._api_configured():
-            item = await self._fetch_api_meme(group_id)
+            item = await self._fetch_api_meme()
         if item is None:
             return event.plain_result(
-                "库里还空着。发一张图并附上「/meme 收」就能投稿，"
+                "库里还空着。引用一张图、@我，打「/meme 投稿」就能入库；"
                 "管理员也可以用「/meme 拉」从第三方接口拉几张。"
             )
 
@@ -857,23 +844,14 @@ class MemePlugin(Star):
 
     # --- 投稿 ---------------------------------------------------------------
 
-    async def _do_submit(
-        self, event: AstrMessageEvent, images: list, *, public: bool = False
-    ) -> Any:
-        """投稿。
-
-        ``public=True`` 对应 ``/meme 投稿``（卡片上那个按钮教的写法）：图进**公共
-        库**，别的群也刷得到。``/meme 收`` 保持老行为，按配置的
-        ``submission_scope``（默认只本群）。
-        """
+    async def _do_submit(self, event: AstrMessageEvent, images: list) -> Any:
+        """投稿。图库只有一份，所有群共用，所以没有「只进本群」这一说了。"""
         if not images:
             yield event.plain_result(
-                "投稿方式：发图时引用它、@我，然后输入「/meme 投稿」。\n"
-                "（老写法「/meme 收」也还能用，只是那种只进本群。）"
+                "投稿方式：发图时引用它、@我，然后输入「/meme 投稿」。"
             )
             return
         umo = event.unified_msg_origin
-        group_id = event.get_group_id() or ""
         sender = str(event.get_sender_id() or "")
 
         # 被拉黑的人连审核都不跑：省一次模型调用，也让他知道拒的是"人"不是"图"
@@ -882,13 +860,6 @@ class MemePlugin(Star):
             logger.info("[Meme] 已拉黑的人尝试投稿：%s（%s）", sender, ban.get("reason", ""))
             yield event.plain_result("你的投稿权限已被关闭，这张不会入库。")
             return
-
-        if public:
-            scope = str(self.cfg.get("submit_command_scope", SCOPE_GLOBAL) or SCOPE_GLOBAL)
-        else:
-            scope = str(self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP)
-        if scope not in (SCOPE_GROUP, SCOPE_GLOBAL):
-            scope = SCOPE_GROUP
 
         limit = self._cfg_int("daily_submit_limit", 10)
         used = self._submit_used_today(umo, sender)
@@ -912,15 +883,12 @@ class MemePlugin(Star):
                 data,
                 origin="submitted",
                 contributor=sender,
-                group_id=group_id,
-                scope=scope,
             )
             if outcome.ok and outcome.meme is not None:
                 accepted += 1
                 tag = "重画成中文版" if outcome.redrawn else "已入库"
                 dup = "（早就有了）" if outcome.duplicate else ""
-                where = "公共库，别的群也刷得到" if scope == SCOPE_GLOBAL else "本群"
-                lines.append(f"#{outcome.meme.id} {tag}{dup}（进{where}）：{outcome.reason}")
+                lines.append(f"#{outcome.meme.id} {tag}{dup}：{outcome.reason}")
             else:
                 lines.append(f"没收：{outcome.reason}")
             if outcome.banned:
@@ -1036,13 +1004,12 @@ class MemePlugin(Star):
     # --- 库 / 删 / 审 -------------------------------------------------------
 
     async def _do_stats(self, event: AstrMessageEvent) -> Any:
-        group_id = event.get_group_id() or ""
-        stats = await asyncio.to_thread(self.store.stats, group_id)
+        stats = await asyncio.to_thread(self.store.stats)
         yield event.plain_result(
             format_stats(
                 total=stats["total"],
                 by_origin=stats["by_origin"],
-                group_total=stats["group_total"],
+                active=stats["active"],
                 rejected=stats["rejected"],
             )
         )
@@ -1058,7 +1025,7 @@ class MemePlugin(Star):
         if item is None:
             return event.plain_result(f"没有 #{meme_id} 这张")
         try:
-            if item.origin != "bundled" and os.path.isfile(item.file_path):
+            if os.path.isfile(item.file_path):
                 os.remove(item.file_path)
         except OSError:
             pass
@@ -1100,7 +1067,7 @@ class MemePlugin(Star):
         if not self._api_configured():
             yield event.plain_result("没有配置第三方接口（配置里的 third_party_api_url）")
             return
-        item = await self._fetch_api_meme(event.get_group_id() or "")
+        item = await self._fetch_api_meme()
         if item is None:
             yield event.plain_result("拉图失败：接口没给图，或者图没过审（细节看日志）")
             return
@@ -1133,7 +1100,7 @@ class MemePlugin(Star):
             proxy=self._proxy(),
         )
 
-    async def _fetch_api_meme(self, group_id: str) -> MemeItem | None:
+    async def _fetch_api_meme(self) -> MemeItem | None:
         """拉一张、过审、入库；整条链都走同一个 pipeline。"""
         try:
             data, source_url = await self._api_source().fetch()
@@ -1143,8 +1110,6 @@ class MemePlugin(Star):
         outcome = await self.pipeline.ingest(
             data,
             origin="api",
-            group_id=group_id,
-            scope=SCOPE_GLOBAL,
             source_url=source_url,
         )
         if outcome.ok and outcome.meme is not None:
@@ -1155,27 +1120,24 @@ class MemePlugin(Star):
     # --- 自检 ---------------------------------------------------------------
 
     async def _do_selftest(self, event: AstrMessageEvent, images: list) -> Any:
-        """跑一遍完整管线，把审核 JSON 原样回给管理员。"""
+        """引用一张图跑一遍完整管线，把审核 JSON 原样回给管理员。
+
+        以前没带图时会拿插件自带的内置图顶上；内置图已经全部删掉了，所以现在
+        必须自己引用一张 —— 反正测的就是「这张图会不会被收」，用别的图测没有意义。
+        """
         if not self._is_admin(event):
             yield event.plain_result("只有管理员能自检")
             return
-        data = b""
-        if images:
-            try:
-                data = await self._component_bytes(images[0])
-            except Exception as exc:  # noqa: BLE001
-                yield event.plain_result(f"拿不到这张图：{exc}")
-                return
+        if not images:
+            yield event.plain_result("自检要先引用一张图：引用它、@我，打「/meme 测试」。")
+            return
+        try:
+            data = await self._component_bytes(images[0])
+        except Exception as exc:  # noqa: BLE001
+            yield event.plain_result(f"拿不到这张图：{exc}")
+            return
         if not data:
-            bundled_dir = os.path.join(os.path.dirname(__file__), "assets", "bundled")
-            names = sorted(os.listdir(bundled_dir)) if os.path.isdir(bundled_dir) else []
-            for name in names:
-                path = os.path.join(bundled_dir, name)
-                if os.path.isfile(path):
-                    data = await asyncio.to_thread(self._read_file, path)
-                    break
-        if not data:
-            yield event.plain_result("没有可用于自检的图（assets/bundled 是空的）")
+            yield event.plain_result("这张图读出来是空的。")
             return
         review = await self.pipeline.review_bytes(data)
         from .meme.review import judge
@@ -1293,8 +1255,7 @@ class MemePlugin(Star):
             logger.info("[Meme] %s 处于免打扰时段，跳过", umo)
             return
 
-        group_id = str(state.get("group_id") or "")
-        item = await asyncio.to_thread(self.pipeline.pick, group_id, self._weights())
+        item = await asyncio.to_thread(self.pipeline.pick, self._weights())
         if item is None:
             return
         caption = compose_caption(
@@ -1529,11 +1490,10 @@ class MemePlugin(Star):
         query: str = "",
         sort: str = "",
         status: str = "",
-        group_id: str = "",
         limit: int = 24,
         offset: int = 0,
     ) -> dict:
-        """页面首屏要的一切：候选图一页 + 统计 + 来源分布 + 群列表。"""
+        """页面首屏要的一切：候选图一页 + 统计 + 来源分布。"""
         from .meme.gallery import (
             SORT_NEW,
             build_gallery,
@@ -1542,12 +1502,12 @@ class MemePlugin(Star):
             sort_items,
         )
 
-        stats = await asyncio.to_thread(self.store.stats, group_id)
-        items = await asyncio.to_thread(self.store.random_pool, group_id)
+        stats = await asyncio.to_thread(self.store.stats)
+        items = await asyncio.to_thread(self.store.random_pool)
         # 已下架的也要能在页面上看见（否则「删掉的图」在界面里凭空消失）
         disabled = [
             item
-            for item in await asyncio.to_thread(self.store.recent, 200, group_id)
+            for item in await asyncio.to_thread(self.store.recent, 200)
             if item.status != "active"
         ]
         everything = {item.id: item for item in list(items) + list(disabled)}
@@ -1573,7 +1533,6 @@ class MemePlugin(Star):
             "proxy": self._proxy(),
             "dataDir": self.data_dir,
         }
-        page["groups"] = await asyncio.to_thread(self._known_groups)
         page["blacklist"] = await asyncio.to_thread(self.store.list_blacklist, 20)
         page["card"] = {
             "enabled": self._card_enabled(),
@@ -1583,28 +1542,6 @@ class MemePlugin(Star):
             "materials": len(await asyncio.to_thread(self.store.card_material_ids)),
         }
         return page
-
-    def _known_groups(self) -> list[dict]:
-        """见过面的群（页面上的「按群筛选」用）。"""
-        try:
-            rows = self.store._rows("SELECT * FROM groups")  # noqa: SLF001 - 只读一处
-        except Exception:  # noqa: BLE001
-            return []
-        result = []
-        for row in rows:
-            record = dict(row)
-            result.append(
-                {
-                    "umo": record.get("umo", ""),
-                    "groupId": record.get("group_id", ""),
-                    "dailyEnabled": bool(record.get("daily_enabled")),
-                    "dailySlots": record.get("daily_slots", ""),
-                    "blockedUntil": float(record.get("blocked_until") or 0),
-                    "lastPush": float(record.get("last_push") or 0),
-                    "pushCount": int(record.get("push_count") or 0),
-                }
-            )
-        return sorted(result, key=lambda item: item["groupId"])
 
     async def web_detail(self, raw_id: str) -> dict | None:
         from .meme.thumbs import PREVIEW_SIZE, data_url, read_thumb
@@ -1628,7 +1565,6 @@ class MemePlugin(Star):
             "image": image,
             "mime": item.mime,
             "origin": item.origin,
-            "scope": item.scope,
             "status": item.status,
             "caption": item.caption,
             "captionZh": item.caption_zh,
@@ -1643,21 +1579,18 @@ class MemePlugin(Star):
         }
 
     def web_upload_options(self) -> dict:
-        """页面上的「免审」「可见范围」两个开关，存在库里。
+        """页面上的「免审」开关，存在库里。
 
         为什么不用请求参数：上传走的是桥接层的二进制通道（`bridge.upload`），
-        它只带文件、不带额外字段。所以页面在改动这两个开关时先写一条记录，
+        它只带文件、不带额外字段。所以页面在改动这个开关时先写一条记录，
         上传时再读回来。同一个人操作后台，不存在并发歧义。
-        """
-        scope = self.store.get_meta("web_upload_scope", "") or str(
-            self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP
-        )
-        skip = self.store.get_meta("web_upload_skip_review", "1")
-        return {"scope": scope, "skipReview": skip != "0"}
 
-    async def web_set_upload_options(self, *, scope: str = "", skip_review=None) -> dict:
-        if scope in (SCOPE_GROUP, SCOPE_GLOBAL):
-            self.store.set_meta("web_upload_scope", scope)
+        （「可见范围」这个选项跟着单群图库一起删了：库只有一份。）
+        """
+        skip = self.store.get_meta("web_upload_skip_review", "1")
+        return {"skipReview": skip != "0"}
+
+    async def web_set_upload_options(self, *, skip_review=None) -> dict:
         if skip_review is not None:
             self.store.set_meta("web_upload_skip_review", "1" if skip_review else "0")
         return {"ok": True, **self.web_upload_options()}
@@ -1667,7 +1600,6 @@ class MemePlugin(Star):
         data: bytes,
         filename: str = "",
         *,
-        scope: str = "",
         skip_review=None,
     ) -> dict:
         """网页拖进来的图。
@@ -1677,19 +1609,16 @@ class MemePlugin(Star):
         把页面上的勾去掉即可，走的就是群友投稿那条完全一样的管线。
         """
         options = self.web_upload_options()
-        if not scope:
-            scope = options["scope"]
         if skip_review is None:
             skip_review = options["skipReview"]
 
         if skip_review:
-            outcome = await self._ingest_without_review(data, scope=scope)
+            outcome = await self._ingest_without_review(data)
         else:
             outcome = await self.pipeline.ingest(
                 data,
                 origin="submitted",
                 contributor="web",
-                scope=scope or str(self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP),
             )
         result = {
             "ok": bool(outcome.ok),
@@ -1702,12 +1631,11 @@ class MemePlugin(Star):
             result["meme"] = {
                 "id": outcome.meme.id,
                 "origin": outcome.meme.origin,
-                "scope": outcome.meme.scope,
                 "caption": outcome.meme.caption,
             }
         return result
 
-    async def web_fetch_url(self, url: str, *, scope: str = "", skip_review=None) -> dict:
+    async def web_fetch_url(self, url: str, *, skip_review=None) -> dict:
         """拖进来的只是一张图的**网址**（不是文件）→ 服务端去把它下回来。
 
         为什么要在服务端下：面板页面跑在沙盒 iframe 里（面板给的是
@@ -1750,12 +1678,12 @@ class MemePlugin(Star):
                 "message": f"这张太大了（{human_size(len(data))}，上限 {human_size(max_bytes)}）",
             }
         name = (parsed.path.rsplit("/", 1)[-1] or "downloaded")[:80]
-        result = await self.web_upload(data, name, scope=scope, skip_review=skip_review)
+        result = await self.web_upload(data, name, skip_review=skip_review)
         result["sourceUrl"] = target
         result["message"] = f"{result.get('message', '')}（来自网址 {host}）"
         return result
 
-    async def _ingest_without_review(self, data: bytes, *, scope: str = ""):
+    async def _ingest_without_review(self, data: bytes):
         """免审入库：仍然做格式/大小/查重，只是跳过模型审核。"""
         from .meme.media import ext_for_mime, human_size, sha256_of, sniff_image
         from .meme.models import STATUS_ACTIVE, IngestResult
@@ -1782,8 +1710,6 @@ class MemePlugin(Star):
             sha256=sha256,
             file_path=path,
             origin="submitted",
-            scope=scope or str(self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP),
-            group_id="",
             mime=mime,
             caption="",
             tags=("免审",),
@@ -1795,22 +1721,41 @@ class MemePlugin(Star):
             return IngestResult(ok=False, reason="入库失败（数据库异常）")
         return IngestResult(ok=True, meme=meme, reason="已免审入库")
 
+    async def _probe_image(self) -> bytes:
+        """自检用的测试图：现做一张纯色 PNG，不依赖库里有没有图、也不依赖内置图。
+
+        以前这里读 ``assets/bundled`` 里的种子图；内置图整套删掉之后，自检不该
+        再去要求「库里有图」（刚装好的机器人库里本来就是空的）。
+        """
+        def _make() -> bytes:
+            try:
+                import io as _io
+
+                from PIL import Image as _PILImage, ImageDraw
+
+                img = _PILImage.new("RGB", (640, 480), (32, 96, 200))
+                draw = ImageDraw.Draw(img)
+                draw.rectangle([40, 40, 600, 440], outline=(255, 255, 255), width=6)
+                buffer = _io.BytesIO()
+                img.save(buffer, "PNG")
+                return buffer.getvalue()
+            except Exception:  # noqa: BLE001
+                # 没有 PIL：一张 1x1 的合法 PNG（够验链路能不能上传，群里又看不到）
+                return base64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+                    "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+                )
+
+        return await asyncio.to_thread(_make)
+
     async def web_card_probe(self) -> dict:
         """卡片图自检：素材库 → 图床，逐项试，结果说人话。"""
         hub = self._get_hub(quiet=True)
         if hub is None:
             return {"ok": False, "message": "没有 QQ Official Hub，卡片用不了（会退纯图片）"}
-        bundled = os.path.join(os.path.dirname(__file__), "assets", "bundled")
-        data = b""
-        if os.path.isdir(bundled):
-            for name in sorted(os.listdir(bundled)):
-                path = os.path.join(bundled, name)
-                if os.path.isfile(path):
-                    with open(path, "rb") as fh:
-                        data = fh.read()
-                    break
+        data = await self._probe_image()
         if not data:
-            return {"ok": False, "message": "插件里没有内置图，没法自检"}
+            return {"ok": False, "message": "生成不出测试图（PIL 不可用？）"}
         width, height = _image_size(data)
         report: dict[str, Any] = {"ok": False, "size": f"{width}x{height}", "checks": []}
 
@@ -1888,7 +1833,7 @@ class MemePlugin(Star):
         if item is None:
             return {"ok": False, "message": f"没有 #{meme_id} 这张"}
         try:
-            if item.origin != "bundled" and os.path.isfile(item.file_path):
+            if os.path.isfile(item.file_path):
                 os.remove(item.file_path)
         except OSError:
             pass

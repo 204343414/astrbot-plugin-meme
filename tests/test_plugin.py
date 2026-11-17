@@ -128,7 +128,7 @@ def plugin(plugin_module, tmp_path):
     return instance
 
 
-def add_meme(plugin, tag="one", origin="submitted", group_id="G1", scope="group"):
+def add_meme(plugin, tag="one", origin="submitted"):
     data = JPEG_HEAD + tag.encode() + b"\x00" * 32
     sha = __import__("hashlib").sha256(data).hexdigest()
     path = plugin.store.save_media(sha, data, ".jpg")
@@ -136,8 +136,6 @@ def add_meme(plugin, tag="one", origin="submitted", group_id="G1", scope="group"
         sha256=sha,
         file_path=path,
         origin=origin,
-        scope=scope,
-        group_id=group_id,
         caption="hi",
     )
     return plugin.store.get(meme_id)
@@ -199,7 +197,7 @@ def test_random_send_is_cooldown_limited(plugin):
 def test_group_cooldown_applies_across_users(plugin):
     plugin.config["send_cooldown_seconds"] = 30
     add_meme(plugin, "one")
-    add_meme(plugin, "two", group_id="G1")
+    add_meme(plugin, "two")
     run(plugin._do_random(FakeEvent(sender_id="U1")))
     kind, payload = run(plugin._do_random(FakeEvent(sender_id="U2")))
     assert kind == "plain"
@@ -324,11 +322,12 @@ def test_stats_command_reports_empty_library(plugin):
     assert "还没有可发的图" in chunks[0][1]
 
 
-def test_stats_command_counts_group_scope(plugin):
-    add_meme(plugin, "one", group_id="G1")
-    add_meme(plugin, "two", group_id="G2")
-    chunks = run(collect(plugin._do_stats(FakeEvent(group_id="G1"))))
-    assert "本群可用：1 张" in chunks[0][1]
+def test_stats_command_counts_the_shared_library(plugin):
+    add_meme(plugin, "one")
+    add_meme(plugin, "two")
+    chunks = run(collect(plugin._do_stats(FakeEvent())))
+    # 图库只有一份：两个「群」问到的都是同一批
+    assert "库里能发：2 张" in chunks[0][1]
 
 
 def test_delete_requires_admin(plugin):
@@ -452,7 +451,7 @@ def test_daily_command_can_be_turned_off(plugin):
 
 
 def test_daily_push_marks_usage_and_counter(plugin, monkeypatch):
-    add_meme(plugin, "one", group_id="G1")
+    add_meme(plugin, "one")
     umo = "qq_official:GroupMessage:G1"
     plugin.store.touch_group(umo, "G1")
     plugin.store.set_daily(umo, True, "09:00")
@@ -472,7 +471,7 @@ def test_daily_push_marks_usage_and_counter(plugin, monkeypatch):
 
 
 def test_daily_push_respects_per_day_cap(plugin):
-    add_meme(plugin, "one", group_id="G1")
+    add_meme(plugin, "one")
     umo = "qq_official:GroupMessage:G1"
     plugin.store.touch_group(umo, "G1")
     plugin.store.set_daily(umo, True, "09:00")
@@ -500,7 +499,7 @@ def test_daily_push_skips_blocked_groups(plugin):
 
 
 def test_permission_denied_blocks_group_for_a_day(plugin):
-    add_meme(plugin, "one", group_id="G1")
+    add_meme(plugin, "one")
     umo = "qq_official:GroupMessage:G1"
     plugin.store.touch_group(umo, "G1")
     plugin.store.set_daily(umo, True, "09:00")
@@ -516,19 +515,32 @@ def test_permission_denied_blocks_group_for_a_day(plugin):
     assert state["blocked_until"] > 0
 
 
-# --- 内置图自检 -------------------------------------------------------------
+# --- 自检（必须自己带图）---------------------------------------------------
 
 def test_selftest_requires_admin(plugin):
     chunks = run(collect(plugin._do_selftest(FakeEvent(sender_id="U1"), [])))
     assert "管理员" in chunks[0][1]
 
 
-def test_selftest_reports_review_json(plugin):
+def test_selftest_needs_an_image_now(plugin):
+    """内置图已经全删了：不带图自检只会让你先引用一张，不会偷偷拿别的图顶。"""
     plugin.config["extra_admins"] = ["U1"]
-    bundled = os.path.join(os.path.dirname(plugin.data_dir), "bundled_probe")
+
+    class FakeImage:
+        type = "Image"
+
+        def __init__(self, data):
+            self.data = data
+
     chunks = run(collect(plugin._do_selftest(FakeEvent(sender_id="U1"), [])))
-    # 仓库自带种子图时走内置图，否则会提示没有可用图；两种都不能崩
-    assert "自检结果" in chunks[0][1] or "没有可用于自检" in chunks[0][1]
+    assert "/meme 测试" in chunks[0][1]
+
+    async def fake_bytes(component):
+        return component.data
+
+    plugin._component_bytes = fake_bytes
+    chunks = run(collect(plugin._do_selftest(FakeEvent(sender_id="U1"), [FakeImage(JPEG_HEAD + b"probe")])))
+    assert "自检结果" in chunks[0][1]
 
 
 # --- 惰性解析 Provider ------------------------------------------------------

@@ -204,9 +204,10 @@ def test_state_is_empty_but_valid(env):
     assert data["running"]["dataDir"]
 
 
-def test_state_exposes_known_groups(env):
+def test_state_no_longer_lists_groups(env):
+    """页面上的「按群筛选」跟着单群图库一起删了：图库只有一份，没有群视角。"""
     env["plugin"].store.touch_group("qq_official:GroupMessage:G1", "G1")
-    assert state(env)["groups"][0]["groupId"] == "G1"
+    assert "groups" not in state(env)
 
 
 # --- 上传 ---------------------------------------------------------------
@@ -242,9 +243,9 @@ def test_duplicate_upload_is_reported(env):
 def test_upload_options_switch_to_reviewed_upload(env):
     options = data_of(
         request(env, "post", "/astrbot_plugin_meme/ui/options",
-                json_body={"scope": "global", "skip_review": False})
+                json_body={"skip_review": False})
     )
-    assert options == {"ok": True, "scope": "global", "skipReview": False}
+    assert options == {"ok": True, "skipReview": False}
 
     data = upload(env, jpeg_bytes((10, 10, 200)), filename="dog.jpg")
     assert data["ok"] is True
@@ -252,22 +253,21 @@ def test_upload_options_switch_to_reviewed_upload(env):
     assert env["moderator"].calls == 1  # 这次真的送审了
 
     item = env["plugin"].store.get(data["meme"]["id"])
-    assert item.scope == "global"
     assert item.caption_zh == "当代码跑通的时候"
 
 
 def test_options_survive_between_requests(env):
     request(env, "post", "/astrbot_plugin_meme/ui/options",
-            json_body={"scope": "global", "skip_review": True})
+            json_body={"skip_review": True})
     again = data_of(request(env, "get", "/astrbot_plugin_meme/ui/options"))
-    assert again["scope"] == "global"
     assert again["skipReview"] is True
+    assert "scope" not in again  # 「可见范围」跟着单群图库一起删了
 
 
 def test_state_filters_by_origin_and_query(env):
     upload(env, jpeg_bytes((1, 1, 1)), filename="1.jpg")
     request(env, "post", "/astrbot_plugin_meme/ui/options",
-            json_body={"skip_review": False, "scope": "group"})
+            json_body={"skip_review": False})
     upload(env, jpeg_bytes((2, 2, 2)), filename="2.jpg")
 
     only_reviewed = state(env, "?origin=submitted&q=%E4%BB%A3%E7%A0%81")

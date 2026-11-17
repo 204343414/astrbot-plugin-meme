@@ -10,13 +10,10 @@ from typing import Callable, Iterable
 from .models import MemeItem, STATUS_ACTIVE
 
 ORIGIN_LABELS = {
-    "bundled": "内置",
     "submitted": "投稿",
     "api": "接口",
     "generated": "AI 现画",
 }
-SCOPE_LABELS = {"group": "本群", "global": "全局"}
-
 SORT_NEW = "new"
 SORT_STALE = "stale"
 SORT_WARM = "warm"
@@ -80,8 +77,6 @@ def build_card(item: MemeItem, thumb_url: str = "", has_file: bool = True) -> di
         "thumb": thumb_url,
         "origin": item.origin,
         "originLabel": origin_label(item.origin),
-        "scope": item.scope,
-        "scopeLabel": SCOPE_LABELS.get(item.scope, item.scope),
         "status": item.status,
         "active": item.status == STATUS_ACTIVE,
         "caption": item.caption,
@@ -116,7 +111,7 @@ def build_gallery(
         ],
         "total": len(items),
         "libraryTotal": int(stats.get("total", 0)),
-        "groupTotal": int(stats.get("group_total", 0)),
+        "activeTotal": int(stats.get("active", 0)),
         "rejected": int(stats.get("rejected", 0)),
         "offset": offset,
         "limit": limit,

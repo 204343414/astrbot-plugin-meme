@@ -12,7 +12,7 @@ import os
 import pytest
 
 from meme.chinese import MODE_APPEND, MODE_OFF, MODE_REDRAW
-from meme.pipeline import MemePipeline, seed_bundled
+from meme.pipeline import MemePipeline
 from meme.review import ReviewPolicy
 from meme.store import MemeStore
 
@@ -107,14 +107,13 @@ def test_clean_submission_is_stored_with_translation(store):
     translator = FakeTranslator()
     pipeline = make_pipeline(store, moderator=moderator, translator=translator)
 
-    outcome = run(pipeline.ingest(img(), contributor="U1", group_id="G1"))
+    outcome = run(pipeline.ingest(img(), contributor="U1"))
 
     assert outcome.ok is True
     assert outcome.meme is not None
     assert outcome.meme.caption == "when the code works"
     assert outcome.meme.caption_zh == "当代码跑通的时候"
     assert outcome.meme.contributor == "U1"
-    assert outcome.meme.scope == "group"
     assert os.path.isfile(outcome.meme.file_path)
     assert moderator.calls == 1
     assert translator.calls == 1
@@ -353,30 +352,6 @@ def test_recheck_can_be_disabled(store):
 # --- 选图 ------------------------------------------------------------------
 
 def test_pipeline_pick_uses_origin_weights(store):
-    run(make_pipeline(store).ingest(img("w"), contributor="U1", scope="global"))
-    picked = store.pick("G1", {"bundled": 0, "submitted": 1})
+    run(make_pipeline(store).ingest(img("w"), contributor="U1"))
+    picked = store.pick({"api": 0, "submitted": 1})
     assert picked is not None and picked.origin == "submitted"
-
-
-# --- 内置种子 ---------------------------------------------------------------
-
-def test_seed_bundled_registers_files_once(store, tmp_path):
-    bundled = tmp_path / "bundled"
-    bundled.mkdir()
-    (bundled / "好耶.jpg").write_bytes(img("seed1"))
-    (bundled / "classic.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
-    (bundled / "readme.txt").write_text("not an image")
-
-    added = seed_bundled(store, str(bundled))
-    again = seed_bundled(store, str(bundled))
-
-    assert added == 2
-    assert again == 0
-    assert store.stats()["total"] == 2
-    items = store.random_pool("任何群")
-    assert all(item.origin == "bundled" and item.scope == "global" for item in items)
-    assert any(item.caption == "好耶" for item in items)
-
-
-def test_seed_bundled_handles_missing_dir(store):
-    assert seed_bundled(store, "/nonexistent/dir") == 0

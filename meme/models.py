@@ -10,12 +10,8 @@ import json
 from dataclasses import dataclass, field, fields
 
 #: 一张图的来源。权重配置按这个枚举取值，新增来源要同步改 _conf_schema。
-ORIGINS = ("bundled", "api", "submitted", "generated")
-
-#: 投稿作用域：group = 只在本群可见（默认，避版权扩散），global = 所有群可见。
-SCOPE_GROUP = "group"
-SCOPE_GLOBAL = "global"
-SCOPES = (SCOPE_GROUP, SCOPE_GLOBAL)
+#: 图库只有一份、所有群共用（没有「单群库」），所以来源里也不再区分内置图。
+ORIGINS = ("api", "submitted", "generated")
 
 STATUS_ACTIVE = "active"
 STATUS_DISABLED = "disabled"
@@ -28,8 +24,6 @@ class MemeItem:
     id: int = 0
     sha256: str = ""
     origin: str = "submitted"
-    scope: str = SCOPE_GROUP
-    group_id: str = ""
     file_path: str = ""
     mime: str = "image/jpeg"
     #: 图里出现的原文（审核时由多模态模型抄写下来的）

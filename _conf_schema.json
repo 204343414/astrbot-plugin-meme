@@ -26,16 +26,6 @@
     "default": 160,
     "min": 0
   },
-  "submission_scope": {
-    "type": "string",
-    "title": "投稿图的可见范围",
-    "description": "群友投的图，是只在这个群能刷到（group，默认），还是所有群共用（global）。选 group 更稳妥——别人投的图在别的群出现，容易引出转图和版权的事。",
-    "options": [
-      "group",
-      "global"
-    ],
-    "default": "group"
-  },
   "daily_submit_limit": {
     "type": "int",
     "title": "每人每天投稿上限",
@@ -150,8 +140,8 @@
   "redraw_size": {
     "type": "string",
     "title": "重绘尺寸",
-    "description": "重画出来的边长。1024x1024 最通用；原图是长方形的可以试 1536x1024。",
-    "default": "1024x1024"
+    "description": "auto（默认）= 按原图的横竖比例自动挑画布：宽图用 1536x1024、竖图用 1024x1536、接近方形才用 1024x1024；画完还会裁回原图比例，所以出来的图比例跟原图一致。画图接口只认这几档固定尺寸，想强行指定就填其中一档。",
+    "default": "auto"
   },
   "redraw_quality": {
     "type": "string",
@@ -179,13 +169,6 @@
     "default": 120.0,
     "min": 10.0
   },
-  "weight_bundled": {
-    "type": "float",
-    "title": "内置图权重",
-    "description": "随机挑图时，内置素材占多大比重。权重是相对的：内置 1 + 投稿 3 意味着大约 25% 发内置、75% 发群友投的。设 0 = 不发内置图。",
-    "default": 1.0,
-    "min": 0.0
-  },
   "weight_submitted": {
     "type": "float",
     "title": "投稿图权重",
@@ -210,7 +193,7 @@
   "third_party_api_url": {
     "type": "string",
     "title": "第三方梗图接口地址",
-    "description": "一个能返回随机梗图的网址。留空 = 不用这个来源，完全靠内置图 + 群友投稿（最稳的方案）。填了之后，库里没图或者权重抽到它时才会去拉。",
+    "description": "一个能返回随机梗图的网址。留空 = 不用这个来源，完全靠群友投稿（最稳的方案）。填了之后，库里没图或者权重抽到它时才会去拉。",
     "default": ""
   },
   "third_party_api_json_path": {
@@ -305,16 +288,6 @@
     "min": 1,
     "max": 89,
     "description": "同一张梗图第二次发出去时，直接复用上次传的引用，不再占新额度 —— 库里 30 张图最多只占 30 格。QQ 的引用是「90 天内没被引用就失效」，所以这里默认 80 天，留 10 天余量；万一还是失效了，插件会自动重传一次，不会发裂图。"
-  },
-  "submit_command_scope": {
-    "type": "string",
-    "title": "/meme 投稿 收到哪里",
-    "options": [
-      "global",
-      "group"
-    ],
-    "default": "global",
-    "description": "global = 卡片教的「/meme 投稿」把图放进公共库，别的群也能刷到（默认）。group = 只进本群库。老的「/meme 收」不受这个开关影响，永远按上面「投稿图的可见范围」走。"
   },
   "ban_malicious_submitter": {
     "type": "bool",

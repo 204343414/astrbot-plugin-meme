@@ -1,4 +1,4 @@
-"""图库：去重、作用域、随机挑选、审核缓存、推送状态。"""
+"""图库：去重、随机挑选、审核缓存、推送状态。"""
 from __future__ import annotations
 
 import os
@@ -19,11 +19,10 @@ def store(tmp_path):
     return instance
 
 
-def _item(meme_id=1, origin="submitted", used_count=0, used_at=0.0, scope="group"):
+def _item(meme_id=1, origin="submitted", used_count=0, used_at=0.0):
     return MemeItem(
         id=meme_id,
         origin=origin,
-        scope=scope,
         used_count=used_count,
         used_at=used_at,
     )
@@ -74,34 +73,32 @@ def test_save_media_writes_file(store, tmp_path):
     assert not os.path.exists(path + ".part")
 
 
-# --- 作用域 ----------------------------------------------------------------
+# --- 池子 ----------------------------------------------------------------
 
-def test_group_scope_only_visible_in_its_group(store):
-    store.add(sha256="1" * 64, file_path="/tmp/1.jpg", scope="group", group_id="G1")
-    store.add(sha256="2" * 64, file_path="/tmp/2.jpg", scope="global")
-    store.add(sha256="3" * 64, file_path="/tmp/3.jpg", scope="group", group_id="G2")
-
-    g1 = {item.sha256 for item in store.random_pool("G1")}
-    g2 = {item.sha256 for item in store.random_pool("G2")}
-    assert g1 == {"1" * 64, "2" * 64}
-    assert g2 == {"2" * 64, "3" * 64}
+def test_pool_is_shared_by_every_group(store):
+    """没有「单群库」了：谁问都是同一批图。"""
+    store.add(sha256="1" * 64, file_path="/tmp/1.jpg")
+    store.add(sha256="2" * 64, file_path="/tmp/2.jpg")
+    pool = {item.sha256 for item in store.random_pool()}
+    assert pool == {"1" * 64, "2" * 64}
 
 
 def test_disabled_images_are_not_offered(store):
     meme_id, _ = store.add(sha256="4" * 64, file_path="/tmp/4.jpg")
     store.set_status(meme_id, "disabled")
-    assert store.random_pool("G1") == []
+    assert store.random_pool() == []
 
 
-def test_stats_counts_group_scope_and_origins(store):
-    store.add(sha256="5" * 64, file_path="/a", scope="global", origin="bundled")
-    store.add(sha256="6" * 64, file_path="/b", scope="group", group_id="G1")
-    store.add(sha256="7" * 64, file_path="/c", scope="group", group_id="G2")
+def test_stats_counts_active_and_origins(store):
+    store.add(sha256="5" * 64, file_path="/a", origin="api")
+    store.add(sha256="6" * 64, file_path="/b")
+    disabled_id, _ = store.add(sha256="7" * 64, file_path="/c")
+    store.set_status(disabled_id, "disabled")
     store.reject("8" * 64, "不像梗图")
-    stats = store.stats("G1")
+    stats = store.stats()
     assert stats["total"] == 3
-    assert stats["group_total"] == 2
-    assert stats["by_origin"] == {"bundled": 1, "submitted": 2}
+    assert stats["active"] == 2
+    assert stats["by_origin"] == {"api": 1, "submitted": 1}
     assert stats["rejected"] == 1
 
 
@@ -109,25 +106,25 @@ def test_stats_counts_group_scope_and_origins(store):
 
 def test_pick_prefers_never_used():
     items = [
-        _item(1, origin="bundled", used_count=5, used_at=900),
-        _item(2, origin="bundled", used_count=0, used_at=0),
+        _item(1, origin="api", used_count=5, used_at=900),
+        _item(2, origin="api", used_count=0, used_at=0),
     ]
     for seed in range(20):
         import random
 
-        chosen = pick_meme(items, {"bundled": 1}, random.Random(seed))
+        chosen = pick_meme(items, {"api": 1}, random.Random(seed))
         assert chosen.id == 2
 
 
 def test_pick_falls_back_to_least_recently_used():
     items = [
-        _item(1, origin="bundled", used_count=3, used_at=900),
-        _item(2, origin="bundled", used_count=3, used_at=100),
+        _item(1, origin="api", used_count=3, used_at=900),
+        _item(2, origin="api", used_count=3, used_at=100),
     ]
     import random
 
     for seed in range(20):
-        assert pick_meme(items, {"bundled": 1}, random.Random(seed)).id == 2
+        assert pick_meme(items, {"api": 1}, random.Random(seed)).id == 2
 
 
 def test_pick_skips_zero_weight_origins():
@@ -140,24 +137,24 @@ def test_pick_skips_zero_weight_origins():
 
 
 def test_pick_returns_none_when_everything_is_zero_weight():
-    assert pick_meme([_item(1)], {"bundled": 0}, None) is None
+    assert pick_meme([_item(1)], {"submitted": 0}, None) is None
 
 
 def test_pick_respects_relative_weights():
-    """内置 1 : 投稿 9 —— 两百次里内置应该占一成上下，不能一边倒。"""
+    """接口 1 : 投稿 9 —— 两千次里接口应该占一成上下，不能一边倒。"""
     import random
 
-    items = [_item(i, origin="bundled") for i in range(1, 6)] + [
+    items = [_item(i, origin="api") for i in range(1, 6)] + [
         _item(i, origin="submitted") for i in range(6, 11)
     ]
     rng = random.Random(7)
-    picks = [pick_meme(items, {"bundled": 1, "submitted": 9}, rng) for _ in range(2000)]
-    bundled = sum(1 for item in picks if item.origin == "bundled")
-    assert 120 < bundled < 280
+    picks = [pick_meme(items, {"api": 1, "submitted": 9}, rng) for _ in range(2000)]
+    api = sum(1 for item in picks if item.origin == "api")
+    assert 120 < api < 280
 
 
-def test_store_pick_uses_scope_and_marks_usage(store):
-    meme_id, _ = store.add(sha256="9" * 64, file_path="/x", scope="global")
+def test_store_pick_marks_usage(store):
+    meme_id, _ = store.add(sha256="9" * 64, file_path="/x")
     store.mark_used(meme_id)
     item = store.get(meme_id)
     assert item.used_count == 1

@@ -14,9 +14,6 @@
         <p id="subtitle">正在读取…</p>
       </div>
       <div class="topbar-actions">
-        <select id="groupFilter" title="只看某个群的视角">
-          <option value="">全部群视角</option>
-        </select>
         <button id="refresh" class="ghost">刷新</button>
         <button id="toggleSettings" class="ghost">调参</button>
         <button id="toggleBans" class="ghost">禁止投稿</button>
@@ -24,7 +21,7 @@
     </header>
 
     <section class="stats" aria-label="统计">
-      <div class="stat"><b id="statGroup">0</b><span>本群可用</span></div>
+      <div class="stat"><b id="statActive">0</b><span>能发</span></div>
       <div class="stat"><b id="statTotal">0</b><span>全库</span></div>
       <div class="stat"><b id="statRejected">0</b><span>已拒收</span></div>
       <div class="stat"><b id="statMode">—</b><span>中文化模式</span></div>
@@ -50,13 +47,6 @@
         <label class="switch">
           <input type="checkbox" id="optSkipReview" checked />
           <span>免审入库<em>不看审核模型，直接进库（省一次调用）</em></span>
-        </label>
-        <label class="select-label">
-          可见范围
-          <select id="optScope">
-            <option value="group">只本群（group）</option>
-            <option value="global">全局共用（global）</option>
-          </select>
         </label>
       </div>
       <div id="uploadProgress" class="upload-progress hidden" aria-live="polite"></div>
