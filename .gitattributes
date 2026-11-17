@@ -1,0 +1,4 @@
+# 中文文件名（内置梗图）在 Windows 上 checkout 依赖 UTF-8 文件名，明确一下。
+* text=auto
+*.jpg binary
+*.png binary

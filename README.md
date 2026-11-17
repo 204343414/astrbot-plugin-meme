@@ -1,14 +1,110 @@
-# astrbot-plugin-helloworld
+# astrbot-plugin-meme · 每日梗图
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+群里发一句 `/meme`，随机来一张梗图；群友发的图 `@bot /meme 收` 就进本群图库。
+所有进来的图都过一遍**多模态审核**（色情 / 血腥 / 现实政治 / 广告水印 / 是不是梗图），
+英文梗图自动**中文化**，对味的图越攒越多，这个群的口味也就越来越准。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+- **四源合一**：内置素材 / 群友投稿 / 第三方接口 / AI 现画（预留），四者不互斥，按权重抽。
+- **只有一份审核和投递实现**：任何来源的图都走同一条管线，不会有一条路绕开审核。
+- **不发脏话过滤表**：只按「类别开关 + 色情等级阈值」判断，梗图的谐音黑话不会被误杀。
+- **被动优先**：`/meme` 是一次被动回复，不需要任何主动消息权限就能用。
 
-# Supports
+---
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+## 一、装完之后干什么（三步）
+
+1. **在「提供商」里确认有两个可用模型**
+   - 一个**能看图**的多模态模型（审核用）——比如 `gemini-3.1-flash-lite` / `gpt-6-astra` / `grok-4.7`；
+   - 一个**能画图**的 OpenAI 兼容线路（只有选 `redraw` 才需要）。
+2. **插件配置里点一下选择**
+   - 「审核用多模态 Provider」→ 从提供商里选（`_special: select_provider`，就是个下拉选择器）；
+   - 「英文梗图怎么变中文」→ 先用默认的 `append`（只翻字幕，不动画面）。
+3. **群里试**：`/meme`（应该有内置图出来），`/meme 测试`（管理员，输出审核 JSON）。
+
+> 说白了：**什么都不配也能发内置图**，只是投稿会被拒收——因为「没人看过的图不进库」是默认策略。
+
+---
+
+## 二、命令
+
+| 命令 | 谁能用 | 干什么 |
+| --- | --- | --- |
+| `/meme`（别名 `梗图`、`来张梗图`） | 所有人 | 随机发一张 |
+| 发图 + `/meme 收` | 所有人 | 投稿（先审后收）；直接发图不带子命令也算投稿 |
+| `/meme 库` | 所有人 | 看这个群有多少张能发、来源分布、被拒收了几张 |
+| `/meme 每日` | 所有人 | 看每日推送状态 |
+| `/meme 每日 9:00,21:00` / `/meme 每日 关` | 管理员 | 开/关定时推送 |
+| `/meme 删 <编号>` | 管理员 | 下架一张 |
+| `/meme 审核 <编号>` | 管理员 | 重新审一次；不通过会自动下架 |
+| `/meme 拉` | 管理员 | 立刻从第三方接口拉一张入库 |
+| `/meme 测试` | 管理员 | 跑一遍审核管线，把模型回的 JSON 打给你看 |
+| `/meme 帮助` | 所有人 | 上面这些 |
+
+管理员 = AstrBot 全局 `admins_id`，或配置里的「额外的管理员 ID」。
+
+---
+
+## 三、配置项（都能在面板里改，每项都有「说白了」的说明）
+
+最关键的五项：
+
+| 配置 | 默认 | 说白了 |
+| --- | --- | --- |
+| `moderation_provider_id` | 空 | 审核用的多模态模型。**不选 = 投稿一律拒收** |
+| `nsfw_max_level` | `1` | 色情等级上限（0 安全 … 4 露骨）。填 1 = 轻微暗示可以，擦边不收 |
+| `reject_flags` | `gore, politics, ads_or_watermark, minor, hate` | 直接拒收的类别 |
+| `caption_zh_mode` | `append` | `off` 不管 / `append` 只翻字幕 / `redraw` 真重画中文版 |
+| `weight_submitted` : `weight_bundled` | `3 : 1` | 抽图时投稿图和内置图的比例 |
+
+其余见 `_conf_schema.json`，每一项都有中文标题和大白话解释。
+
+---
+
+## 四、管线长什么样
+
+```
+                     ┌──────────── 四源 ────────────┐
+   内置素材(bundled)  │ 群友投稿(submitted)          │  第三方接口(api)   AI 现画(generated, 预留)
+                     └──────────────┬───────────────┘
+                                    ▼
+                       字节校验（是不是图 / 多大）
+                                    ▼
+                     sha256 查重 → 审核缓存命中？（只花一次钱）
+                                    ▼
+                   多模态审核 → {"is_meme","nsfw_level","flags","caption_text","language"}
+                                    ▼
+                 类别开关 + 色情阈值 + 是否梗图 → 拒收就记 sha256，永不重审
+                                    ▼
+                 caption_zh_mode：append 翻字幕 / redraw 重画（重画完再审一次）
+                                    ▼
+                            落盘 + SQLite 入库
+                                    ▼
+                   投递：Hub 富媒体 → AstrBot 原生图片 → 纯文字
+```
+
+## 五、为什么这么设计
+
+- **审核只有一处实现**：图中任何一个来源如果有自己的审核逻辑，早晚会有一个入口漏掉。
+- **不是关键词黑名单**：梗图的文字是谐音、错字、黑话，关键词表既误杀好图又漏掉真问题；判断画面的是模型。
+- **`fail_closed` 默认开**：审核超时/报错/回话解析不出来时**拒收**，而不是当作「干净」放行——「审核挂了」和「审核通过」是两件事。
+- **`redraw` 一定要重审**：画图模型偶尔会把正常图改成擦边图，所以重画版必须再过一次；不过就退回原图 + 字幕模式。
+- **主动推送有前提**：QQ 官方群主动消息要**群主在群设置里打开「机器人主动在群聊内发言」**，否则接口回 `40034105 主动消息失败, 无权限`；插件收到这个错误会**静默停推 24 小时**并只记日志，不在群里刷报错。
+
+## 六、开发
+
+```bash
+python -m pytest -q          # 164 项，不需要装 AstrBot
+```
+
+`meme/` 里一行 `astrbot` 都不 import：审核判定、入库、随机挑选、投递降级全是纯逻辑，
+`main.py` 才是唯一碰框架的地方（把 provider 包成 adapter、把 event 包成 sender）。
+
+## 七、约定与边界
+
+- 群友投稿默认 **`group` 作用域**：只在这个群能刷到，不跨群扩散（避版权与转图纠纷）。
+- 内置图是自带素材，**入库不再花审核费**；用 `assets/bundled/` 里的文件名当图注。
+- 素材只收 **jpg / png / gif / webp**，单张默认 ≤ 8MB（QQ 自己是 10MB 上限，留了余量）。
+
+## License
+
+AGPL-3.0
