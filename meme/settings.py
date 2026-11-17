@@ -49,6 +49,20 @@ FIELDS: tuple[Field, ...] = (
           hint="QQ 素材库每机器人 100 张；留太多会撞上限，留 60 左右合适"),
     Field("card_material_reuse_days", "同一张图复用几天", "int", 1, 89,
           hint="QQ 引用 90 天没被用到才失效；留 80 天，失效了会自动重传"),
+    Field("card_show_auto", "卡片上显示「自动订阅/取消自动」按钮", "bool",
+          hint="关掉就没有第三个按钮；已经订阅的群照常自动发"),
+    Field("auto_push_enabled", "自动搬石总开关", "bool",
+          hint="关掉后所有群都不再自动发，各群的订阅档位留着"),
+    Field("auto_push_low_pct", "低档概率（%／小时）", "int", 0, 100,
+          hint="说白了：选「低」的群每小时有这么多机会冒一张，10% ≈ 平均两天多一张"),
+    Field("auto_push_mid_pct", "中档概率（%／小时）", "int", 0, 100,
+          hint="说白了：25% ≈ 平均一天六张"),
+    Field("auto_push_high_pct", "高档概率（%／小时）", "int", 0, 100,
+          hint="说白了：50% ≈ 平均一天十二张；嫌吵就调低，群里看到的按钮数字会跟着变"),
+    Field("auto_push_max_per_day", "每群每天最多自动发几条", "int", 0, 48,
+          hint="0 = 不限；默认 8 条，到了就停到第二天"),
+    Field("auto_push_quiet", "自动推送免打扰时段", "text",
+          hint="写成 23:00-08:00 这样（可跨零点）；留空 = 全天都可能发"),
     Field("ban_malicious_submitter", "恶意投稿永久禁止投稿", "bool",
           hint="只针对故意投「能让 bot 被封号」的内容；地狱笑话、擦边、微恶俗不算"),
     Field("ban_notify_group", "拉黑后在群里说一句", "bool"),
@@ -163,3 +177,20 @@ def apply_settings(config, updates: dict) -> tuple[dict, list[str]]:
         config[key] = cleaned
         applied[key] = cleaned
     return applied, errors
+
+
+def auto_prob_problem(values: dict) -> str:
+    """三档概率的顺序检查。返回空串表示没问题。
+
+    为什么要拦：低档填 60、高档填 10 这种手滑，在页面上完全看不出来（三个滑块
+    长得一样），但群里的「低/中/高」就会彻底反过来，事后很难想明白。
+    """
+    try:
+        low = int(values.get("auto_push_low_pct", 10))
+        mid = int(values.get("auto_push_mid_pct", 25))
+        high = int(values.get("auto_push_high_pct", 50))
+    except (TypeError, ValueError):
+        return "三档概率都得是数字"
+    if not (low <= mid <= high):
+        return f"概率要满足 低 ≤ 中 ≤ 高（现在是 {low} / {mid} / {high}）"
+    return ""

@@ -76,6 +76,16 @@ async function loadState({ append = false } = {}) {
   el("statActive").textContent = payload.activeTotal;
   el("statTotal").textContent = payload.libraryTotal;
   el("statRejected").textContent = payload.rejected;
+  if (el("statAuto")) {
+    const auto = payload.auto || {};
+    const pcts = auto.pcts || {};
+    el("statAuto").textContent = auto.enabled
+      ? `${auto.groups || 0} 群 · ${pcts.low ?? 10}/${pcts.mid ?? 25}/${pcts.high ?? 50}%`
+      : "已关（总开关）";
+    el("statAuto").title =
+      `每小时概率：低 ${pcts.low ?? 10}% / 中 ${pcts.mid ?? 25}% / 高 ${pcts.high ?? 50}%` +
+      `；每群每天上限 ${auto.maxPerDay || "不限"}；免打扰 ${auto.quiet || "不设"}`;
+  }
   el("statMode").textContent = payload.running?.captionMode || "—";
   el("statProvider").textContent = payload.running?.moderationProvider || "未配";
   el("statProvider").title = payload.running?.moderationProvider || "";

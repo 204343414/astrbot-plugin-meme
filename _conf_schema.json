@@ -300,5 +300,47 @@
     "title": "拉黑后在群里说一句",
     "default": true,
     "description": "开着的话，执行拉黑后群里会收到一句「这张不收：投稿内容属于故意投递违规图，该投稿人已被永久禁止投稿」。不想公开说就关掉，只写日志。"
+  },
+  "card_show_auto": {
+    "type": "bool",
+    "title": "卡片上显示「自动订阅/取消自动」按钮",
+    "description": "梗图卡片底部的第三个按钮。没订阅的群显示「自动订阅」，订阅中的群显示「取消自动」（点它需要管理员）。关掉就没有这个按钮。",
+    "default": true
+  },
+  "auto_push_enabled": {
+    "type": "bool",
+    "title": "自动搬石总开关",
+    "description": "关掉之后所有群都不再自动发梗图，但各群选的档位会留着，重新打开就继续。",
+    "default": true
+  },
+  "auto_push_low_pct": {
+    "type": "int",
+    "title": "低档概率（%／小时）",
+    "description": "说白了：选了「低」的群，每小时有这么多概率冒一张。10% = 平均两天多一张。改完群里按钮上的数字会跟着变。",
+    "default": 10
+  },
+  "auto_push_mid_pct": {
+    "type": "int",
+    "title": "中档概率（%／小时）",
+    "description": "说白了：25% = 每小时四分之一的机会，平均一天六张左右。",
+    "default": 25
+  },
+  "auto_push_high_pct": {
+    "type": "int",
+    "title": "高档概率（%／小时）",
+    "description": "说白了：50% = 每小时一半的机会，平均一天十二张左右。嫌吵就调低。",
+    "default": 50
+  },
+  "auto_push_max_per_day": {
+    "type": "int",
+    "title": "每群每天最多自动发几条",
+    "description": "0 = 不限。默认 8 条：到了上限就等到第二天，避免概率抽多了在活跃群里刷屏。",
+    "default": 8
+  },
+  "auto_push_quiet": {
+    "type": "string",
+    "title": "自动推送免打扰时段",
+    "description": "写成 23:00-08:00（可跨零点），这段时间内不自动发。留空 = 全天都可能发。手动 /meme 不受影响。",
+    "default": "23:00-08:00"
   }
 }

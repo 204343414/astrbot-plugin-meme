@@ -69,7 +69,13 @@ CREATE TABLE IF NOT EXISTS groups (
     blocked_until REAL NOT NULL DEFAULT 0,
     last_push     REAL NOT NULL DEFAULT 0,
     push_count    INTEGER NOT NULL DEFAULT 0,
-    push_date     TEXT NOT NULL DEFAULT ''
+    push_date     TEXT NOT NULL DEFAULT '',
+    -- 每小时自动推（自动搬石）：''=没开，low/mid/high=档位；
+    -- 概率本身不落库，每次从配置读，面板改了立刻生效。
+    auto_level      TEXT NOT NULL DEFAULT '',
+    auto_since      REAL NOT NULL DEFAULT 0,
+    auto_sent_date  TEXT NOT NULL DEFAULT '',
+    auto_sent_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -138,6 +144,16 @@ class MemeStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_card_materials_sha ON card_materials(sha256)"
             )
+            # 老库补列：每小时自动推（0.5.0 加的）
+            group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
+            for name, ddl in (
+                ("auto_level", "TEXT NOT NULL DEFAULT ''"),
+                ("auto_since", "REAL NOT NULL DEFAULT 0"),
+                ("auto_sent_date", "TEXT NOT NULL DEFAULT ''"),
+                ("auto_sent_count", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in group_columns:
+                    conn.execute(f"ALTER TABLE groups ADD COLUMN {name} {ddl}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=15)
@@ -366,6 +382,60 @@ class MemeStore:
     def daily_groups(self) -> list[dict]:
         rows = self._rows("SELECT * FROM groups WHERE daily_enabled = 1")
         return [dict(row) for row in rows]
+
+    # --- 每小时自动推（自动搬石） ----------------------------------------
+
+    def set_auto_level(self, umo: str, level: str) -> None:
+        """开/关/换档。``level`` 空串 = 关掉。
+
+        关掉时把「今天已发几条」也清零：下次重新订阅应该拿到完整的一天额度，
+        否则一个月前用剩的计数会显得莫名其妙。
+        """
+        if not umo:
+            return
+        self.touch_group(umo)
+        level = str(level or "").strip().lower()
+        if level and level not in ("low", "mid", "high"):
+            raise ValueError(f"不认识的档位：{level}")
+        if level:
+            self._write(
+                "UPDATE groups SET auto_level = ?, auto_since = ? WHERE umo = ?",
+                (level, self.now(), umo),
+            )
+        else:
+            self._write(
+                """UPDATE groups SET auto_level = '', auto_since = 0,
+                       auto_sent_date = '', auto_sent_count = 0 WHERE umo = ?""",
+                (umo,),
+            )
+
+    def auto_groups(self) -> list[dict]:
+        """所有开了自动推送的群。"""
+        rows = self._rows("SELECT * FROM groups WHERE auto_level != ''")
+        return [dict(row) for row in rows]
+
+    def note_auto_push(self, umo: str, *, day_key: str, ok: bool = True) -> int:
+        """记一次自动推送尝试，返回「今天已发几条」。
+
+        只统计**真的发出去了**的次数（``ok=False`` 时数字不动）：发失败的那次不该
+        吃掉当天的额度，否则群关了主动消息之后，第二天限额会莫名其妙地少几条。
+        """
+        if not umo:
+            return 0
+        self.touch_group(umo)  # 没登记过的会话也要能计数（否则 UPDATE 命中 0 行，静默丢数）
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT auto_sent_count, auto_sent_date FROM groups WHERE umo = ?", (umo,)
+            ).fetchone()
+            same_day = bool(row) and row["auto_sent_date"] == day_key
+            count = int(row["auto_sent_count"] or 0) if same_day else 0
+            if ok:
+                count += 1
+            conn.execute(
+                "UPDATE groups SET auto_sent_count = ?, auto_sent_date = ? WHERE umo = ?",
+                (count, day_key, umo),
+            )
+            return count
 
     def group_state(self, umo: str) -> dict | None:
         rows = self._rows("SELECT * FROM groups WHERE umo = ?", (umo,))
