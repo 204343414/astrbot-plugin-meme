@@ -103,7 +103,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.2.0",
+    "0.2.1",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -1280,7 +1280,7 @@ class MemePlugin(Star):
 
         payload = export_settings(self.cfg)
         payload["originLabels"] = ORIGIN_LABELS
-        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.2.0"}
+        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.2.1"}
         return payload
 
     async def web_save_settings(self, values: dict) -> dict:
