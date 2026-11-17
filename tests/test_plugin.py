@@ -529,3 +529,35 @@ def test_selftest_reports_review_json(plugin):
     chunks = run(collect(plugin._do_selftest(FakeEvent(sender_id="U1"), [])))
     # 仓库自带种子图时走内置图，否则会提示没有可用图；两种都不能崩
     assert "自检结果" in chunks[0][1] or "没有可用于自检" in chunks[0][1]
+
+
+# --- 惰性解析 Provider ------------------------------------------------------
+
+def test_pipeline_waits_for_providers_that_load_after_the_plugin(plugin_module, tmp_path):
+    """AstrBot 先 plugin_manager.reload()，再 provider_manager.initialize()。
+
+    所以 initialize() 那一刻 get_provider_by_id 一定是 None；管线必须等到
+    第一次真正用的时候才解析，否则配置明明填了也会一直显示「未配」。
+    """
+    context = FakeContext(providers={})
+
+    class FakeProvider:
+        provider_config = {"api_base": "https://x/v1", "key": "k", "model": "m"}
+
+        async def text_chat(self, prompt=None, image_urls=None, **kwargs):
+            return type("R", (), {"completion_text": "{}"})()
+
+    instance = plugin_module.MemePlugin(
+        context,
+        {
+            "custom_data_dir": str(tmp_path),
+            "moderation_provider_id": "late/provider",
+            "caption_zh_mode": MODE_APPEND,
+        },
+    )
+    instance.store.init()
+    # Provider 还没加载：这时不能把「没有审核」这件事钉死
+    assert instance.pipeline.moderator is None
+
+    context.providers["late/provider"] = FakeProvider()
+    assert instance.pipeline.moderator is not None

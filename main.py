@@ -103,7 +103,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.1.0",
+    "0.1.1",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -116,7 +116,10 @@ class MemePlugin(Star):
             os.path.join(self.data_dir, "meme.db"),
             os.path.join(self.data_dir, "media"),
         )
-        self.pipeline: MemePipeline | None = None
+        # Provider 是**插件加载之后**才实例化的（core_lifecycle：先
+        # plugin_manager.reload()，再 provider_manager.initialize()）。所以在
+        # initialize() 里去解析 provider 一定拿到 None，必须等第一次真正用。
+        self._pipeline: MemePipeline | None = None
         self._cooldowns: dict[tuple[str, str], float] = {}
         self._group_cooldowns: dict[str, float] = {}
         self._hub = None
@@ -127,7 +130,6 @@ class MemePlugin(Star):
 
     async def initialize(self) -> None:
         self.store.init()
-        self._build_pipeline()
         bundled_dir = os.path.join(os.path.dirname(__file__), "assets", "bundled")
         added = await asyncio.to_thread(seed_bundled, self.store, bundled_dir)
         if added:
@@ -135,10 +137,11 @@ class MemePlugin(Star):
         self._ensure_scheduler()
         self._reschedule_daily()
         logger.info(
-            "[Meme] 就绪：数据目录 %s，审核 %s，中文化 %s",
+            "[Meme] 就绪：数据目录 %s，中文化 %s，审核 Provider=%s（首次使用时解析："
+            "AstrBot 是先加载插件、后加载 Provider 的）",
             self.data_dir,
-            "已接" if getattr(self.pipeline, "moderator", None) else "未配（投稿会被拒收）",
             self.config.get("caption_zh_mode", MODE_APPEND),
+            self.cfg.get("moderation_provider_id", "") or "未配（投稿会被拒收）",
         )
 
     async def terminate(self) -> None:
@@ -164,6 +167,35 @@ class MemePlugin(Star):
             path = os.path.join(base, "plugin_data", PLUGIN_NAME)
         os.makedirs(path, exist_ok=True)
         return path
+
+    @property
+    def pipeline(self) -> MemePipeline:
+        """首次使用时才真正建管线（那时 Provider 已经加载好了）。
+
+        解析失败时**不缓存**：配置里明明写了 Provider 却没拿到，多半只是
+        还没加载完（AstrBot 先插件后 Provider），下次进来再试一次就好过
+        一直拿着一份「审核缺失」的管线用到重启。
+        """
+        if self._pipeline is None or self._needs_rebuild():
+            self._build_pipeline()
+        return self._pipeline
+
+    def _needs_rebuild(self) -> bool:
+        pipeline = self._pipeline
+        if pipeline is None:
+            return True
+        if str(self.cfg.get("moderation_provider_id", "") or "").strip():
+            if pipeline.moderator is None:
+                return True
+        if str(self.cfg.get("caption_zh_mode", "") or "") == MODE_REDRAW:
+            if str(self.cfg.get("redraw_provider_id", "") or "").strip():
+                if pipeline.redrawer is None:
+                    return True
+        return False
+
+    @pipeline.setter
+    def pipeline(self, value) -> None:
+        self._pipeline = value
 
     # --- 配置 → 组件 --------------------------------------------------------
 
@@ -230,7 +262,14 @@ class MemePlugin(Star):
             else:
                 logger.warning("[Meme] 中文化选了 redraw 但没选画图 Provider，将只做字幕翻译")
 
-        self.pipeline = MemePipeline(
+        configured = str(self.cfg.get("moderation_provider_id", "") or "").strip()
+        if configured and vision is None:
+            logger.warning(
+                "[Meme] 审核 Provider「%s」没找到：检查 ID 是否写错、或该提供商是否已启用。"
+                "当前按 fail-closed 拒收所有投稿。",
+                configured,
+            )
+        self._pipeline = MemePipeline(
             self.store,
             policy,
             moderator=moderator,
