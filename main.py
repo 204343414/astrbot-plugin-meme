@@ -529,14 +529,26 @@ class MemePlugin(Star):
         await hub.send_ephemeral_card(origin, card, **kwargs)
 
     async def _release_material(self, hub, image_id: str, *, origin: str = "") -> None:
-        """删掉一张素材。失败只损失额度，不影响发图，因此只记 debug。"""
+        """删掉一张素材。
+
+        失败不影响发图，但**会**影响以后：素材攒到 100 张（每机器人上限）就再也传不
+        上去，那时卡片会退到图床 URL。所以这里失败要留一行 INFO，并提示版本 ——
+        Hub 0.24.0 的删除路径少了 ``/delete``，平台回 11001「不支持的调用」，
+        症状是"素材明明能传却删不掉"，很难自己看出来。
+        """
         cleaner = getattr(hub, "delete_image_material", None)
         if cleaner is None or not image_id:
             return
         try:
-            await cleaner(image_id, origin=origin)
+            removed = await cleaner(image_id, origin=origin)
+            if removed is False:
+                logger.info(
+                    "[Meme] 素材 %s 没能删掉。如果你用的是 QQ Official Hub 0.24.0，"
+                    "它的删除路径少了 /delete（平台回 11001），升级到 0.24.1 即可。",
+                    image_id,
+                )
         except Exception:  # noqa: BLE001
-            logger.debug("[Meme] 回收素材失败 %s", image_id, exc_info=True)
+            logger.debug("[Meme] 回收素材出错 %s", image_id, exc_info=True)
         finally:
             await asyncio.to_thread(self.store.drop_card_material, image_id)
 
