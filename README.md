@@ -60,6 +60,8 @@
 | `auto_push_low_pct` / `mid` / `high` | `10 / 25 / 50` | 选了「低/中/高」的群，每小时自动发一张的概率（%） |
 | `auto_push_max_per_day` | `8` | 每群每天最多自动发几条，0 = 不限 |
 | `auto_push_quiet` | `23:00-08:00` | 这段时间不自动发（可跨零点，留空 = 全天） |
+| `auto_push_bootstrap` | `true` | 启动时把还没订阅的群静默开到低档去试（发不出去会自动退订） |
+| `auto_push_bootstrap_days` | `30` | 批量铺开只挑最近多少天有动静的群，0 = 不限 |
 | `redraw_size` | `auto` | 重画尺寸。`auto` = 按原图横竖自动挑画布，画完裁回原比例 |
 
 其余见 `_conf_schema.json`，每一项都有中文标题和大白话解释。

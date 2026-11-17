@@ -93,9 +93,7 @@ HELP_TEXT = """梗图玩法：
 /meme 库 —— 看看库里现在有多少张能发
 /meme 自动 —— 看这个群的每小时自动推送状态
 /meme 自动 关 —— 关掉本群的自动推送（管理员）
-/meme 每日 —— 看每日推送状态
-/meme 每日 9:00,21:00 —— 每天这两个点自动发一张（管理员）
-/meme 每日 关 —— 关掉自动发（管理员）
+/meme 自动 铺开 —— 给还没订阅的群都先开低档（管理员）
 /meme 删 <编号> —— 下架一张（管理员）
 /meme 审核 <编号> —— 重新审一次（管理员）
 /meme 拉 —— 立刻从第三方接口拉一张入库（管理员）
@@ -209,7 +207,8 @@ class MemePlugin(Star):
     async def initialize(self) -> None:
         self.store.init()
         self._ensure_scheduler()
-        self._reschedule_daily()
+        self._reschedule_auto()
+        await self._bootstrap_auto()
         self._register_web()
         self._register_actions()
         logger.info(
@@ -665,18 +664,39 @@ class MemePlugin(Star):
 
         return _callback
 
+    #: Hub 那边「谁算群管」的账本，名字在历史版本里换过，全部试一遍。
+    HUB_IDENTITY_ATTRS = ("identities", "identity", "identity_book")
+
+    def _hub_identity_book(self, hub: object) -> object | None:
+        """拿到 Hub 的 OpenID → 昵称/角色的账本。
+
+        **这里曾经有过一个线上 bug**：只认 ``hub.identity``，而 Hub 的属性叫
+        ``identities``（复数），于是永远取不到，``_is_group_manager`` 对**所有
+        人**返回 False —— 群主和管理员点「取消自动」一律被拒，只有写进
+        ``extra_admins`` 的号能关。别再用单个名字去 getattr。
+        """
+        for name in self.HUB_IDENTITY_ATTRS:
+            book = getattr(hub, name, None)
+            if book is not None and callable(getattr(book, "is_group_manager", None)):
+                return book
+        return None
+
     async def _is_group_manager(self, origin: str, openid: str) -> bool:
         """这个人能不能关自动推送。
 
-        三条路，任意一条通过就放行：
-          1. 配置里的 ``extra_admins``（openid 白名单）—— 我自己的号走这条；
-          2. Hub 的 ``identity`` 账本里记着他是群主/群管（角色只能从消息里学到）；
-          3. QQ 那边压根查不到角色信息时的**保守拒绝**（宁可错杀）。
+        按顺序试，任意一条通过就放行：
+          1. 配置里的 ``extra_admins`` / AstrBot 全局管理员 —— 我自己的号走这条；
+          2. Hub 自己的 ``_clicker_is_manager``：它额外认 Hub 的 operator，
+             和 Hub 面板按钮用的是同一套判断，不会出现「Hub 说能点、插件说不能」；
+          3. Hub 的角色账本 ``identities.is_group_manager``：群主/群管角色是从
+             群消息的 ``author.member_role`` 学来的；
+          4. 都查不到 → 拒绝，但**一定要打日志**（否则下次还是只能靠猜）。
         注意按钮点击事件只带 openid、不带角色，所以从没在群里说过话的管理员
-        可能被拒 —— 拒的时候会告诉他用 ``/meme 自动 关`` 或找机器人主人。
+        仍可能被拒；这时回 ACK 4，客户端会提示「暂无权限」。
         """
         openid = str(openid or "").strip()
         if not openid:
+            logger.warning("[Meme] 拒绝关闭自动推送：点击事件里没有 openid")
             return False
         admins = {str(a) for a in (self.cfg.get("extra_admins") or []) if str(a).strip()}
         try:
@@ -688,18 +708,49 @@ class MemePlugin(Star):
             return True
         hub = self._get_hub(quiet=True)
         if hub is None:
+            logger.warning("[Meme] 拒绝关闭自动推送：拿不到 Hub，无法核对群管身份")
             return False
-        checker = getattr(hub, "is_group_manager", None)
-        if checker is None:
-            identity = getattr(hub, "identity", None)
-            checker = getattr(identity, "is_group_manager", None)
-        if checker is None:
+        public = getattr(hub, "is_group_manager", None)
+        if callable(public):
+            try:
+                return bool(await public(origin, openid))
+            except Exception:  # noqa: BLE001
+                logger.warning("[Meme] Hub 的 is_group_manager 报错", exc_info=True)
+        gate = getattr(hub, "_clicker_is_manager", None)
+        if callable(gate):
+            try:
+                if bool(await gate(origin, openid)):
+                    return True
+                logger.warning(
+                    "[Meme] 拒绝 %s 关闭自动推送：Hub 认为不是群管（角色未学到或确实不是）",
+                    openid[-8:],
+                )
+                return False
+            except Exception:  # noqa: BLE001
+                logger.warning("[Meme] Hub 的群管判断出错，继续按角色账本核对", exc_info=True)
+        book = self._hub_identity_book(hub)
+        if book is None:
+            logger.warning(
+                "[Meme] 拒绝 %s 关闭自动推送：Hub 没有暴露角色账本（属性名：%s）",
+                openid[-8:],
+                [n for n in self.HUB_IDENTITY_ATTRS if getattr(hub, n, None)],
+            )
             return False
         try:
-            return bool(await checker(origin, openid))
+            if await book.is_group_manager(origin, openid):
+                return True
+            role = ""
+            role_of = getattr(book, "role_of", None)
+            if callable(role_of):
+                role = str(await role_of(origin, openid) or "")
+            logger.warning(
+                "[Meme] 拒绝 %s 关闭自动推送：本群记录的角色是「%s」",
+                openid[-8:],
+                role or "未知（他还没在本群说过话）",
+            )
         except Exception:  # noqa: BLE001
-            logger.warning("[Meme] 查群管理身份失败", exc_info=True)
-            return False
+            logger.warning("[Meme] 查群管身份失败", exc_info=True)
+        return False
 
     async def _act_auto_off(self, context, params) -> int:
         """点「取消自动」。必须管理员（用户明确要求）。"""
@@ -710,7 +761,9 @@ class MemePlugin(Star):
         if not await self._is_group_manager(origin, openid):
             # ACK 4 = 无权限：客户端会弹一句提示，不是「按钮没反应」
             return 4
-        await asyncio.to_thread(self.store.set_auto_level, origin, "")
+        await asyncio.to_thread(
+            self.store.set_auto_level, origin, "", opt_out=True, reason="manual"
+        )
         self._auto_fire_slots().pop(origin, None)
         self._reschedule_auto()
         logger.info("[Meme] %s 关闭自动推送（由 %s 操作）", origin, openid)
@@ -793,6 +846,44 @@ class MemePlugin(Star):
                 continue  # 抽不中：绝大多数小时的结局
             await self._auto_push_one(umo, day_key=day_key)
 
+    #: 「这个群不让机器人主动说话」——命中就关订阅，别留着一个永远发不出去的档位。
+    NO_PERMISSION_MARKERS = (
+        "40034105",       # 主动消息失败, 无权限
+        "主动消息失败",
+        "无权限",
+        "没有权限",
+        "权限不足",
+        "无主动消息权限",
+    )
+    #: 「这个群已经不在了」——机器人被踢 / 群解散。同样关订阅。
+    GROUP_GONE_MARKERS = (
+        "不在群",
+        "群不存在",
+        "不存在的群",
+        "群已解散",
+        "已解散",
+        "机器人未加入",
+        "not in group",
+        "invalid group",
+        "group not found",
+    )
+
+    @classmethod
+    def _classify_auto_failure(cls, text: str) -> str:
+        """把失败原因归成三类：``no_permission`` / ``gone`` / ``""``（其它）。
+
+        只有前两类会关订阅。网络抖动、素材库抽风、图太大都属于「还能救」，
+        关掉订阅反而会让人以为功能坏了。
+        """
+        lowered = str(text or "").lower()
+        for marker in cls.GROUP_GONE_MARKERS:
+            if marker.lower() in lowered:
+                return "gone"
+        for marker in cls.NO_PERMISSION_MARKERS:
+            if marker.lower() in lowered:
+                return "no_permission"
+        return ""
+
     async def _auto_push_one(self, umo: str, *, day_key: str) -> None:
         """真的给一个群自动发一条（复用 /meme 的整套发送链路）。"""
         item = await asyncio.to_thread(self.pipeline.pick, self._weights())
@@ -803,9 +894,16 @@ class MemePlugin(Star):
         try:
             await self._send_item_by_origin(umo, item, auto=True)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[Meme] %s 自动推送失败：%s", umo, exc)
             text = str(exc)
-            if "40034105" in text or "无权限" in text or "权限" in text:
+            logger.warning("[Meme] %s 自动推送失败：%s", umo, text)
+            reason = self._classify_auto_failure(text)
+            if reason:
+                # 用户要求：发现没权限 / 已经不在群里，就把这个群的订阅关掉，
+                # 免得占着一个永远发不出去的档位（也免得每次重启都白试一遍）。
+                await asyncio.to_thread(
+                    self.store.set_auto_level, umo, "", opt_out=False, reason=reason
+                )
+                self._auto_fire_slots().pop(umo, None)
                 await asyncio.to_thread(
                     self.store.note_push,
                     umo,
@@ -814,12 +912,36 @@ class MemePlugin(Star):
                     blocked_until=time.time() + PUSH_BLOCK_SECONDS,
                 )
                 logger.warning(
-                    "[Meme] %s 不允许主动消息（群主没开「机器人主动发言」），24 小时内不再自动推",
+                    "[Meme] %s 已自动关闭自动推送（%s）；修好之后需要重新订阅",
                     umo,
+                    "机器人不在这个群了" if reason == "gone" else "群没开「机器人主动发言」",
                 )
             return
         count = await asyncio.to_thread(self.store.note_auto_push, umo, day_key=day_key)
         logger.info("[Meme] %s 自动推送 #%s（今天第 %s 条）", umo, item.id, count)
+
+    async def _bootstrap_auto(self, *, force: bool = False) -> list[str]:
+        """批量给「还没订阅过」的群先开一个低档（用户要的「先悄悄试一遍」）。
+
+        平台没有「查这个群有没有开主动消息」的接口，所以做不到「只给开了权限的
+        群订阅」。这条路子靠的是：先全开 → 抽中时真发一次 → 失败就按上一节自动
+        关掉。于是没权限的群会在第一次被抽中的那一刻自己淘汰，全程不发任何消息。
+        """
+        if not force and not bool(self.cfg.get("auto_push_bootstrap", True)):
+            return []
+        days = self._cfg_int("auto_push_bootstrap_days", 30)
+        try:
+            opened = await asyncio.to_thread(self.store.bootstrap_auto, "low", days)
+        except Exception:  # noqa: BLE001
+            logger.warning("[Meme] 批量铺开自动推送失败", exc_info=True)
+            return []
+        if opened:
+            logger.info(
+                "[Meme] 批量铺开自动推送：%s 个群先开到低档（%s%%/小时）",
+                len(opened),
+                self._auto_pct("low"),
+            )
+        return opened
 
     def _auto_button(self, origin: str) -> str:
         """卡片底部的自动推送按钮：没订阅=「自动订阅」，订阅中=「取消自动」。"""
@@ -1049,8 +1171,13 @@ class MemePlugin(Star):
             return
 
         if sub in ("每日", "推送", "daily"):
-            async for result in self._do_daily(event, rest):
-                yield result
+            # 老命令删了：它和「自动搬石」本来就是同一个能力的两套实现，
+            # 留着会两套定时任务抢同一批图、各自算各自的每日额度。
+            yield event.plain_result(
+                "「/meme 每日」已经删掉了，换成卡片上的「自动订阅」：\n"
+                "每小时按概率随机发一张（低 10% / 中 25% / 高 50%）。\n"
+                "看本群状态：/meme 自动"
+            )
             return
 
         if sub in ("黑名单", "黑名单列表", "bans"):
@@ -1133,6 +1260,7 @@ class MemePlugin(Star):
             data = b""
 
         auto_note = AUTO_NOTE if auto else ""
+        failures: list[str] = []
         msg_id = ""
         if event is not None:
             msg_id = str(
@@ -1145,7 +1273,9 @@ class MemePlugin(Star):
                     origin, item, data, context=context, msg_id=msg_id, auto_note=auto_note
                 ):
                     return True if auto else None
-            except Exception:  # noqa: BLE001
+                failures.append("带图卡片未发出")
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"带图卡片：{exc}")
                 logger.warning("[Meme] 卡片发送失败，降级", exc_info=True)
             # ② 图 + 无图卡片（只有 Hub 在才做得到，它同时负责发图）
             try:
@@ -1166,14 +1296,24 @@ class MemePlugin(Star):
                 )
                 return True if auto else None
             except Exception as exc:  # noqa: BLE001
+                failures.append(f"图+无图卡片：{exc}")
                 logger.warning("[Meme] 图+无图卡片失败：%s", exc)
 
         if data:
-            result = await self._send_image_now(origin, data, caption, item=item, event=event)
+            try:
+                result = await self._send_image_now(
+                    origin, data, caption, item=item, event=event
+                )
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"发图：{exc}")
+                if auto:
+                    raise RuntimeError("；".join(failures)) from exc
+                raise
             return True if (auto and result is None) else result
         if auto:
-            # 自动推送没有 event 可以退：这里必须抛，让上层记失败原因（尤其 40034105）
-            raise RuntimeError(f"图读不出来或没有可用通道（#{item.id}）")
+            # 自动推送没有 event 可以退：把每一级失败都带上，让上层能判断该不该关订阅
+            failures.append(f"图读不出来（#{item.id}）")
+            raise RuntimeError("；".join(failures))
         return event.plain_result(
             f"这张图现在发不出来（#{item.id}）" + (f"\n{caption}" if caption else "")
         )
@@ -1189,11 +1329,13 @@ class MemePlugin(Star):
         空就是"发两次"或"一次都没发"。
         """
         hub = self._get_hub(quiet=True)
+        last_error = ""
         if hub is not None:
             try:
                 await hub.send_image_message(origin, data, text=caption)
                 return None
             except Exception as exc:  # noqa: BLE001
+                last_error = f"{type(exc).__name__}: {exc}"
                 logger.warning("[Meme] Hub 发图失败，改用原生：%s", exc)
         if event is not None:
             chain: list[Any] = []
@@ -1204,7 +1346,9 @@ class MemePlugin(Star):
             if caption:
                 chain.append(Plain(caption))
             return event.chain_result(chain)
-        raise RuntimeError("没有可用的图片发送通道")
+        # 自动推送没有 event 兜底：把**最底下那条**真实错误带出去，
+        # 否则上层只能看到一句「没有通道」，分不清是没权限还是网络抽风。
+        raise RuntimeError(f"没有可用的图片发送通道（{last_error or '无 Hub'}）")
 
     # --- 投稿 ---------------------------------------------------------------
 
@@ -1534,10 +1678,24 @@ class MemePlugin(Star):
             if not self._is_admin(event):
                 yield event.plain_result("只有管理员能关自动推送")
                 return
-            await asyncio.to_thread(self.store.set_auto_level, umo, "")
+            await asyncio.to_thread(
+                self.store.set_auto_level, umo, "", opt_out=True, reason="manual"
+            )
             self._auto_fire_slots().pop(umo, None)
             logger.info("[Meme] %s 关闭自动推送（命令，管理员操作）", umo)
-            yield event.plain_result("已关闭本群的自动推送。")
+            yield event.plain_result(
+                "已关闭本群的自动推送（不会再被批量铺开重新打开）。"
+            )
+            return
+        if rest.strip() in ("铺开", "全部开", "spread"):
+            if not self._is_admin(event):
+                yield event.plain_result("只有管理员能批量铺开")
+                return
+            opened = await self._bootstrap_auto(force=True)
+            yield event.plain_result(
+                f"已给 {len(opened)} 个群开到低档（{self._auto_pct('low')}%/小时）。\n"
+                "没开主动消息或机器人已不在的群，会在第一次被抽中时自动关掉，不会打扰人。"
+            )
             return
         if rest.strip() in ("低", "中", "高"):
             # 开关本身是「所有人都能点」，所以命令版也不拦权限
@@ -1577,183 +1735,17 @@ class MemePlugin(Star):
             "关掉：卡片上点「取消自动」，或 /meme 自动 关（管理员）"
         )
 
-    async def _do_daily(self, event: AstrMessageEvent, rest: str) -> Any:
-        umo = event.unified_msg_origin
-        # 先把群号记下来，否则定时任务只知道 umo、不知道去哪儿挑本群的图
-        await asyncio.to_thread(self.store.touch_group, umo, event.get_group_id() or "")
-        state = await asyncio.to_thread(self.store.group_state, umo) or {}
-        if not rest:
-            enabled = bool(state.get("daily_enabled"))
-            slots = state.get("daily_slots") or ""
-            yield event.plain_result(
-                "每日推送："
-                + ("开着" if enabled else "关着")
-                + (f"，时间 {slots}" if slots else "")
-                + "\n用「/meme 每日 9:00,21:00」打开，「/meme 每日 关」关闭。"
-                + "\n注意：这属于主动消息，需要群主在群设置里允许机器人主动发言。"
-            )
-            return
-        if not self._is_admin(event):
-            yield event.plain_result("只有管理员能改每日推送")
-            return
-        if rest.strip() in ("关", "off", "关闭", "0"):
-            await asyncio.to_thread(self.store.set_daily, umo, False, "")
-            self._reschedule_daily()
-            yield event.plain_result("每日推送已关。")
-            return
-        slots = _parse_slots(rest)
-        if not slots:
-            yield event.plain_result("时间没看懂，写成「9:00,21:00」这样。")
-            return
-        await asyncio.to_thread(self.store.set_daily, umo, True, ",".join(slots))
-        self._reschedule_daily()
-        yield event.plain_result("每日推送已开：" + "、".join(slots))
-
     def _ensure_scheduler(self) -> None:
         if self._scheduler is not None:
             return
         try:
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
         except Exception:  # noqa: BLE001
-            logger.warning("[Meme] 没有 APScheduler，每日推送不可用")
+            logger.warning("[Meme] 没有 APScheduler，自动推送不可用")
             return
         timezone = str(self.cfg.get("timezone", "") or "").strip()
         self._scheduler = AsyncIOScheduler(timezone=timezone or None)
         self._scheduler.start()
-
-    def _reschedule_daily(self) -> None:
-        """把库里的群配置重建成定时任务。
-
-        每次改配置就整体重建：定时任务的状态是最容易被改坏又最难排查的地方，
-        与其做增量 diff，不如每次从库里重新生成一遍，代价是一次 SQL。
-        """
-        if self._scheduler is None:
-            return
-        try:
-            self._scheduler.remove_all_jobs()
-        except Exception:  # noqa: BLE001
-            logger.warning("[Meme] 清理旧定时任务失败", exc_info=True)
-        count = 0
-        for row in self.store.daily_groups():
-            slots = _parse_slots(row.get("daily_slots") or "")
-            if not slots:
-                slots = _parse_slots(str(self.cfg.get("daily_push_slots", "") or ""))
-            umo = row.get("umo") or ""
-            for slot in slots:
-                hour, minute = (int(part) for part in slot.split(":"))
-                try:
-                    self._scheduler.add_job(
-                        self._daily_push,
-                        "cron",
-                        hour=hour,
-                        minute=minute,
-                        args=[umo],
-                        id=f"meme:{umo}:{slot}",
-                        replace_existing=True,
-                        misfire_grace_time=600,
-                        coalesce=True,
-                    )
-                    count += 1
-                except Exception:  # noqa: BLE001
-                    logger.warning("[Meme] 添加定时任务失败 %s %s", umo, slot, exc_info=True)
-        if count:
-            logger.info("[Meme] 已排 %s 个每日推送任务", count)
-        # remove_all_jobs() 刚把自动推送的抽签任务也清掉了，这里补回来
-        self._reschedule_auto()
-
-    async def _daily_push(self, umo: str) -> None:
-        """定时推送一条。任何一步失败都只记日志，不在群里报错。"""
-        if not umo:
-            return
-        state = await asyncio.to_thread(self.store.group_state, umo) or {}
-        now = time.time()
-        blocked_until = float(state.get("blocked_until") or 0)
-        if blocked_until > now:
-            logger.info("[Meme] %s 主动消息被平台拒绝中，跳过", umo)
-            return
-        day_key = _now_day_key(now)
-        push_count = int(state.get("push_count") or 0) if state.get("push_date") == day_key else 0
-        if push_count >= self._cfg_int("daily_push_max_per_day", 2):
-            return
-        if self._in_quiet_hours(dt.datetime.fromtimestamp(now)):
-            logger.info("[Meme] %s 处于免打扰时段，跳过", umo)
-            return
-
-        item = await asyncio.to_thread(self.pipeline.pick, self._weights())
-        if item is None:
-            return
-        caption = compose_caption(
-            item.caption, item.caption_zh, self._cfg_int("caption_limit", 160)
-        )
-        try:
-            data = await asyncio.to_thread(self._read_file, item.file_path)
-        except OSError:
-            return
-
-        sent = False
-        error_text = ""
-        hub = self._get_hub(quiet=True)
-        if hub is not None and hasattr(hub, "send_media_message"):
-            file_type = self._hub_image_file_type(hub)
-            result = await deliver(
-                [
-                    Attempt(
-                        "hub 主动富媒体",
-                        lambda: hub.send_media_message(
-                            umo, data, file_type, text=caption
-                        ),
-                    ),
-                ]
-            )
-            sent = result.ok
-            if not sent:
-                error_text = result.summary()
-        if not sent:
-            result = await deliver(
-                [
-                    Attempt(
-                        "主动图片消息",
-                        lambda: self._send_image_chain(umo, data, caption),
-                    ),
-                    Attempt("主动文字", lambda: self._send_text(umo, caption or "梗图")),
-                ]
-            )
-            sent = result.ok
-            error_text = error_text or result.summary()
-
-        if sent:
-            await asyncio.to_thread(self.store.mark_used, item.id)
-            await asyncio.to_thread(self.store.note_push, umo, ok=True, day_key=day_key)
-            logger.info("[Meme] 已向 %s 推送 #%s", umo, item.id)
-            return
-        if "40034105" in error_text or "无权限" in error_text or "权限" in error_text:
-            await asyncio.to_thread(
-                self.store.note_push,
-                umo,
-                ok=False,
-                day_key=day_key,
-                blocked_until=now + PUSH_BLOCK_SECONDS,
-            )
-            logger.warning(
-                "[Meme] %s 不允许主动消息（群主没开「机器人主动在群聊内发言」），24 小时内不再尝试",
-                umo,
-            )
-        else:
-            logger.warning("[Meme] %s 推送失败：%s", umo, error_text)
-
-    def _in_quiet_hours(self, moment: dt.datetime) -> bool:
-        start = _parse_slots(str(self.cfg.get("daily_push_quiet_start", "") or ""))
-        end = _parse_slots(str(self.cfg.get("daily_push_quiet_end", "") or ""))
-        if not start or not end:
-            return False
-        now_minutes = moment.hour * 60 + moment.minute
-        start_minutes = int(start[0].split(":")[0]) * 60 + int(start[0].split(":")[1])
-        end_minutes = int(end[0].split(":")[0]) * 60 + int(end[0].split(":")[1])
-        if start_minutes == end_minutes:
-            return False
-        if start_minutes < end_minutes:
-            return start_minutes <= now_minutes < end_minutes
-        return now_minutes >= start_minutes or now_minutes < end_minutes
 
     async def _send_image_chain(self, umo: str, data: bytes, caption: str) -> None:
         """主动发图（非 QQ 官方平台的退路；QQ 官方必须走 Hub）。"""
@@ -1959,12 +1951,25 @@ class MemePlugin(Star):
         }
         page["blacklist"] = await asyncio.to_thread(self.store.list_blacklist, 20)
         auto_state = await asyncio.to_thread(self.store.group_state, "") or {}
+        auto_offed = await asyncio.to_thread(self.store.auto_offed_groups, 20)
         page["auto"] = {
             "enabled": self._auto_enabled(),
             "pcts": self._auto_pcts(),
             "maxPerDay": self._cfg_int("auto_push_max_per_day", AUTO_MAX_PER_DAY_DEFAULT),
             "quiet": str(self.cfg.get("auto_push_quiet", AUTO_QUIET_DEFAULT) or ""),
             "groups": len(await asyncio.to_thread(self.store.auto_groups)),
+            "bootstrap": bool(self.cfg.get("auto_push_bootstrap", True)),
+            # 被自动关掉的群：页面上要能看见，否则「订阅自己消失了」没人知道为什么
+            "offed": [
+                {
+                    "umo": str(row.get("umo") or ""),
+                    "reason": str(row.get("auto_off_reason") or ""),
+                    "at": float(row.get("auto_off_at") or 0),
+                    "manual": bool(row.get("auto_opt_out")),
+                }
+                for row in auto_offed
+            ],
+            "offedCount": len(auto_offed),
         }
         page["card"] = {
             "enabled": self._card_enabled(),

@@ -192,22 +192,6 @@ def test_reject_and_lookup(store):
 
 # --- 群推送状态 -------------------------------------------------------------
 
-def test_group_daily_slots_round_trip(store):
-    store.set_daily("qq_official:GroupMessage:G1", True, "09:00,21:00")
-    groups = store.daily_groups()
-    assert len(groups) == 1
-    assert groups[0]["daily_slots"] == "09:00,21:00"
-    store.set_daily("qq_official:GroupMessage:G1", False)
-    assert store.daily_groups() == []
-
-
-def test_touch_group_does_not_erase_a_known_group_id(store):
-    umo = "qq_official:GroupMessage:G1"
-    store.touch_group(umo, "G1")
-    store.set_daily(umo, True, "09:00")   # 内部会 touch 一次，但拿不到群号
-    assert store.group_state(umo)["group_id"] == "G1"
-
-
 def test_push_counter_resets_on_new_day(store):
     umo = "qq_official:GroupMessage:G1"
     store.touch_group(umo, "G1")

@@ -209,34 +209,6 @@
     "default": 30.0,
     "min": 5.0
   },
-  "daily_push_max_per_day": {
-    "type": "int",
-    "title": "每个群每天最多推几条",
-    "description": "定时推送的上限。QQ 官方给的额度是每群每天 1000 条，但推多了会被群友嫌吵，2 条基本是「早上看一眼、睡前看一眼」的量。",
-    "default": 2,
-    "min": 0
-  },
-  "daily_push_slots": {
-    "type": "list",
-    "title": "默认推送时间",
-    "description": "群主第一次用 /meme 每日 没写时间时，就用这里的时间点。格式是 HH:MM，可以写多个。",
-    "default": [
-      "09:00",
-      "21:00"
-    ]
-  },
-  "daily_push_quiet_start": {
-    "type": "string",
-    "title": "免打扰开始时间",
-    "description": "这段时间内不主动发图（怕半夜吵人）。和下面那项配合，跨零点也支持，比如 23:00 → 08:00。留空 = 不设免打扰。",
-    "default": ""
-  },
-  "daily_push_quiet_end": {
-    "type": "string",
-    "title": "免打扰结束时间",
-    "description": "免打扰到几点结束，到了之后定时推送恢复正常。",
-    "default": ""
-  },
   "timezone": {
     "type": "string",
     "title": "定时任务时区（留空 = 跟 AstrBot 一致）",
@@ -342,5 +314,17 @@
     "title": "自动推送免打扰时段",
     "description": "写成 23:00-08:00（可跨零点），这段时间内不自动发。留空 = 全天都可能发。手动 /meme 不受影响。",
     "default": "23:00-08:00"
+  },
+  "auto_push_bootstrap": {
+    "type": "bool",
+    "title": "启动时给还没订阅的群先开一个低档",
+    "description": "说白了：先悄悄把每个群都设成「低（10%/小时）」去试。平台没有「查这个群有没有开主动消息」的接口，所以只能靠试：抽中后发不出去，插件会把那个群的订阅自动关掉，全程不在群里发任何提示。",
+    "default": true
+  },
+  "auto_push_bootstrap_days": {
+    "type": "int",
+    "title": "批量铺开只挑最近多少天活跃的群",
+    "description": "0 = 所有见过的群都算。默认 30 天，避免去碰三个月没动静的死群。",
+    "default": 30
   }
 }

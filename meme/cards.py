@@ -27,6 +27,11 @@ from typing import Any
 
 from .models import MemeItem
 
+#: 卡片在 Hub 那边的可点有效期。Hub 默认 3600 秒（1 小时），但那意味着聊天记录里
+#: 一小时前的卡片，点上去只会得到一句「卡片已过期」—— 群友以为是按钮坏了。
+#: 按钮本身有一次性/归属校验，放宽到 24 小时（Hub 允许的上限）只是让旧卡还能用。
+CARD_TTL_SECONDS = 86400
+
 #: hub 的 action id。卡片按钮靠它回到我们的回调，改名字要同步改 main.py 的注册。
 ACTION_AGAIN = "meme.again"
 ACTION_HOWTO = "meme.howto"
@@ -155,6 +160,7 @@ def build_meme_card(
         "rows": _buttons(show_again, show_howto, auto),
         # 谁都能点：这张卡是发在群里的，锁成发起者会让别人点了没反应
         "owner_mode": "everyone",
+        "ttl_seconds": CARD_TTL_SECONDS,
     }
 
 
@@ -167,6 +173,7 @@ def build_howto_card(*, show_again: bool = True) -> dict[str, Any]:
         "markdown": HOWTO_MARKDOWN,
         "rows": _buttons(show_again, False),
         "owner_mode": "everyone",
+        "ttl_seconds": CARD_TTL_SECONDS,
     }
 
 
@@ -192,7 +199,12 @@ def build_auto_pick_card(pcts: dict[str, int]) -> dict[str, Any]:
         {"id": "mid", "label": f"中{mid}%"[:MAX_LABEL], "action_id": ACTION_AUTO_MID},
         {"id": "high", "label": f"高{high}%"[:MAX_LABEL], "action_id": ACTION_AUTO_HIGH},
     ]
-    return {"markdown": markdown, "rows": [row], "owner_mode": "everyone"}
+    return {
+        "markdown": markdown,
+        "rows": [row],
+        "owner_mode": "everyone",
+        "ttl_seconds": CARD_TTL_SECONDS,
+    }
 
 
 def build_auto_done_card(
@@ -226,4 +238,5 @@ def build_auto_done_card(
         "markdown": markdown,
         "rows": _buttons(show_again, show_howto, auto),
         "owner_mode": "everyone",
+        "ttl_seconds": CARD_TTL_SECONDS,
     }

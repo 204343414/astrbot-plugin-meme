@@ -432,3 +432,28 @@ def test_old_db_without_sha_column_still_loads(tmp_path):
     cols = {row["name"] for row in store._rows("PRAGMA table_info(card_materials)")}
     assert {"sha256", "url", "last_used"} <= cols
     assert store.card_material_ids() == ["old1"]
+
+
+def test_every_card_stays_clickable_for_a_day():
+    """Hub 默认只认 1 小时，聊天记录里的旧卡点上去只会说「卡片已过期」，
+    群友会以为按钮坏了（线上真的发生过）。卡片自己声明 24 小时。"""
+    from meme_plugin_under_test.meme.cards import (
+        ACTION_AUTO_OFF,
+        CARD_TTL_SECONDS,
+        build_auto_done_card,
+        build_auto_pick_card,
+        build_howto_card,
+        build_meme_card,
+    )
+
+    assert CARD_TTL_SECONDS == 86400
+    item = MemeItem(id=1, file_path="/tmp/a.jpg", mime="image/jpeg")
+    for card in (
+        build_meme_card(item),
+        build_howto_card(),
+        build_auto_pick_card({"low": 10, "mid": 25, "high": 50}),
+        build_auto_done_card("high", 50),
+    ):
+        assert card["ttl_seconds"] == CARD_TTL_SECONDS
+    card = build_auto_done_card("high", 50)
+    assert [b["action_id"] for b in card["rows"][0]][-1] == ACTION_AUTO_OFF

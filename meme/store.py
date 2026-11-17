@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS rejects (
 CREATE TABLE IF NOT EXISTS groups (
     umo           TEXT PRIMARY KEY,
     group_id      TEXT NOT NULL DEFAULT '',
+    -- daily_enabled / daily_slots 是老「/meme 每日」留下的列。那个功能已经删了
+    -- （和自动搬石是同一个能力的两套实现），列留着不动老表结构，代码不读。
     daily_enabled INTEGER NOT NULL DEFAULT 0,
     daily_slots   TEXT NOT NULL DEFAULT '',
     blocked_until REAL NOT NULL DEFAULT 0,
@@ -75,7 +77,15 @@ CREATE TABLE IF NOT EXISTS groups (
     auto_level      TEXT NOT NULL DEFAULT '',
     auto_since      REAL NOT NULL DEFAULT 0,
     auto_sent_date  TEXT NOT NULL DEFAULT '',
-    auto_sent_count INTEGER NOT NULL DEFAULT 0
+    auto_sent_count INTEGER NOT NULL DEFAULT 0,
+    -- 「试过了但不行」的墓碑：群没开主动消息 / 机器人不在群里时自动关订阅，
+    -- 记下原因和时间，之后不再自动重开（否则每次重启都白试一遍）。
+    auto_off_reason TEXT NOT NULL DEFAULT '',
+    auto_off_at     REAL NOT NULL DEFAULT 0,
+    -- 1 = 是用户/管理员明确点「取消自动」关的，批量铺开时不许覆盖
+    auto_opt_out    INTEGER NOT NULL DEFAULT 0,
+    -- 最后一次在这个群活动的时间（批量铺开只挑最近活跃的群）
+    last_seen       REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -151,6 +161,10 @@ class MemeStore:
                 ("auto_since", "REAL NOT NULL DEFAULT 0"),
                 ("auto_sent_date", "TEXT NOT NULL DEFAULT ''"),
                 ("auto_sent_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("auto_off_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("auto_off_at", "REAL NOT NULL DEFAULT 0"),
+                ("auto_opt_out", "INTEGER NOT NULL DEFAULT 0"),
+                ("last_seen", "REAL NOT NULL DEFAULT 0"),
             ):
                 if name not in group_columns:
                     conn.execute(f"ALTER TABLE groups ADD COLUMN {name} {ddl}")
@@ -349,27 +363,20 @@ class MemeStore:
     def touch_group(self, umo: str, group_id: str = "") -> None:
         """登记一个见过面的会话。
 
-        ``group_id`` 只在非空时覆盖：``set_daily`` 这类从别处调过来的地方
-        拿不到群号，如果让它把已有的群号写成空串，定时推送就会去一个空群的
-        池子里挑图，然后一张也挑不到——静默地什么都不发。
+        ``group_id`` 只在非空时覆盖：从按钮回调这类拿不到群号的地方调过来时，
+        如果让它把已有的群号写成空串，主动推送就会拿着空群去挑图。
         """
         if not umo:
             return
         with self._lock, self._connect() as conn:
             conn.execute(
-                """INSERT INTO groups (umo, group_id) VALUES (?,?)
-                   ON CONFLICT(umo) DO UPDATE SET group_id =
-                       CASE WHEN excluded.group_id <> '' THEN excluded.group_id
-                            ELSE groups.group_id END""",
-                (umo, group_id or ""),
+                """INSERT INTO groups (umo, group_id, last_seen) VALUES (?,?,?)
+                   ON CONFLICT(umo) DO UPDATE SET
+                       group_id = CASE WHEN excluded.group_id <> ''
+                                       THEN excluded.group_id ELSE groups.group_id END,
+                       last_seen = excluded.last_seen""",
+                (umo, group_id or "", self.now()),
             )
-
-    def set_daily(self, umo: str, enabled: bool, slots: str = "") -> None:
-        self.touch_group(umo)
-        self._write(
-            "UPDATE groups SET daily_enabled = ?, daily_slots = ? WHERE umo = ?",
-            (1 if enabled else 0, slots or "", umo),
-        )
 
     def recent_group_umos(self, limit: int = 5) -> list[str]:
         """最近说过话的群（有 umo 的那些）。卡片自检需要一个真群来拿 client。"""
@@ -379,17 +386,26 @@ class MemeStore:
         )
         return [row["umo"] for row in rows]
 
-    def daily_groups(self) -> list[dict]:
-        rows = self._rows("SELECT * FROM groups WHERE daily_enabled = 1")
-        return [dict(row) for row in rows]
-
     # --- 每小时自动推（自动搬石） ----------------------------------------
 
-    def set_auto_level(self, umo: str, level: str) -> None:
+    def set_auto_level(
+        self,
+        umo: str,
+        level: str,
+        *,
+        opt_out: bool = True,
+        reason: str = "",
+    ) -> None:
         """开/关/换档。``level`` 空串 = 关掉。
 
-        关掉时把「今天已发几条」也清零：下次重新订阅应该拿到完整的一天额度，
-        否则一个月前用剩的计数会显得莫名其妙。
+        关掉时有两种，必须分清楚，否则「批量铺开试一遍」会变成死循环：
+
+        * ``opt_out=True``（默认，用户点「取消自动」/ 管理员命令）—— 打上
+          ``auto_opt_out`` 标记，之后批量铺开**不许**再把它打开；
+        * ``opt_out=False, reason="no_permission"`` —— 是自动关闭：记下墓碑
+          （原因 + 时间），之后同样不再重开，但页面上要能看出「不是人关的」。
+
+        顺便把「今天已发几条」清零：下次重新订阅应该拿到完整的一天额度。
         """
         if not umo:
             return
@@ -399,20 +415,74 @@ class MemeStore:
             raise ValueError(f"不认识的档位：{level}")
         if level:
             self._write(
-                "UPDATE groups SET auto_level = ?, auto_since = ? WHERE umo = ?",
+                """UPDATE groups SET auto_level = ?, auto_since = ?,
+                       auto_off_reason = '', auto_off_at = 0, auto_opt_out = 0
+                   WHERE umo = ?""",
                 (level, self.now(), umo),
+            )
+            return
+        if opt_out:
+            self._write(
+                """UPDATE groups SET auto_level = '', auto_since = 0,
+                       auto_sent_date = '', auto_sent_count = 0,
+                       auto_opt_out = 1, auto_off_at = ?, auto_off_reason = ?
+                   WHERE umo = ?""",
+                (self.now(), str(reason or "manual"), umo),
             )
         else:
             self._write(
                 """UPDATE groups SET auto_level = '', auto_since = 0,
-                       auto_sent_date = '', auto_sent_count = 0 WHERE umo = ?""",
-                (umo,),
+                       auto_sent_date = '', auto_sent_count = 0,
+                       auto_opt_out = 0, auto_off_at = ?, auto_off_reason = ?
+                   WHERE umo = ?""",
+                (self.now(), str(reason or "unknown"), umo),
             )
 
     def auto_groups(self) -> list[dict]:
         """所有开了自动推送的群。"""
         rows = self._rows("SELECT * FROM groups WHERE auto_level != ''")
         return [dict(row) for row in rows]
+
+    def auto_offed_groups(self, limit: int = 50) -> list[dict]:
+        """被自动关掉的群（页面上要看得到，否则「怎么自己不推了」无从查起）。"""
+        rows = self._rows(
+            """SELECT * FROM groups
+               WHERE auto_off_reason != '' AND auto_opt_out = 0
+               ORDER BY auto_off_at DESC LIMIT ?""",
+            (int(limit),),
+        )
+        return [dict(row) for row in rows]
+
+    def bootstrap_auto(self, level: str = "low", days: int = 30) -> list[str]:
+        """批量给「还没订阅过」的群先开一档（用户要的「先测试这个功能」）。
+
+        三条硬条件，任意一条不满足就跳过：
+          1. ``auto_level`` 为空 —— 已经订阅的群不动；
+          2. ``auto_opt_out = 0`` —— 人明确关过的不许偷偷重开；
+          3. ``auto_off_reason = ''`` —— 自动关过（没权限/不在群）的也不再试。
+
+        再按「最近出现过」过滤：平台没有「查这个群开没开主动消息」的接口，我们
+        只能靠「抽中之后真发一次、失败再关」来淘汰 —— 所以至少别去碰那些三个月
+        没动静的死群。``days=0`` 表示不限。
+        返回真正开起来的 umo 列表。
+        """
+        level = str(level or "low")
+        if level not in ("low", "mid", "high"):
+            raise ValueError(f"不认识的档位：{level}")
+        cutoff = self.now() - int(days) * 86400 if days and days > 0 else 0.0
+        rows = self._rows(
+            """SELECT umo, last_seen, last_push FROM groups
+               WHERE umo != '' AND auto_level = ''
+                 AND auto_opt_out = 0 AND auto_off_reason = ''""",
+        )
+        opened: list[str] = []
+        for row in rows:
+            seen = max(float(row["last_seen"] or 0), float(row["last_push"] or 0))
+            if cutoff and seen < cutoff:
+                continue
+            self.set_auto_level(row["umo"], level)
+            opened.append(row["umo"])
+        return opened
 
     def note_auto_push(self, umo: str, *, day_key: str, ok: bool = True) -> int:
         """记一次自动推送尝试，返回「今天已发几条」。

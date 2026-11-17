@@ -475,18 +475,72 @@ def test_cancel_works_when_hub_knows_the_group_role(plugin):
     plugin.store.touch_group(FakeActionContext.origin, "G1")
     plugin.store.set_auto_level(FakeActionContext.origin, "high")
 
-    class FakeHub:
+    class Book:
+        def __init__(self, role):
+            self.role = role
+
         async def is_group_manager(self, origin, openid):
-            return openid == "MANAGER"
+            return openid == "MANAGER" and self.role in ("owner", "admin")
+
+        async def role_of(self, origin, openid):
+            return self.role if openid == "MANAGER" else ""
+
+    class FakeHub:
+        """照 Hub 的真实形状：角色账本叫 identities（复数）。"""
+
+        def __init__(self, role):
+            self.identities = Book(role)
 
     async def capture(origin, card, **kwargs):
         return None
 
     plugin._send_hub_card = capture
-    hub = FakeHub()
+    hub = FakeHub("owner")
     plugin._get_hub = lambda quiet=False: hub  # type: ignore[assignment]
     assert asyncio.run(plugin._act_auto_off(FakeActionContext("MANAGER"), {})) == 0
     assert plugin.store.group_state(FakeActionContext.origin)["auto_level"] == ""
+
+
+def test_cancel_refused_when_the_recorded_role_is_a_plain_member(plugin):
+    plugin.store.touch_group(FakeActionContext.origin, "G1")
+    plugin.store.set_auto_level(FakeActionContext.origin, "high")
+
+    class Book:
+        async def is_group_manager(self, origin, openid):
+            return False
+
+        async def role_of(self, origin, openid):
+            return "member"
+
+    class FakeHub:
+        def __init__(self):
+            self.identities = Book()
+
+    plugin._get_hub = lambda quiet=False: FakeHub()  # type: ignore[assignment]
+    assert asyncio.run(plugin._act_auto_off(FakeActionContext("MANAGER"), {})) == 4
+    assert plugin.store.group_state(FakeActionContext.origin)["auto_level"] == "high"
+
+
+def test_cancel_uses_the_hub_gate_when_it_is_available(plugin):
+    """Hub 自己的 _clicker_is_manager 还认 operator / AstrBot 管理员，
+    插件跟它用同一套判断，才不会出现「Hub 说能点、插件说不能」。"""
+    plugin.store.touch_group(FakeActionContext.origin, "G1")
+    plugin.store.set_auto_level(FakeActionContext.origin, "high")
+    seen = []
+
+    class FakeHub:
+        async def _clicker_is_manager(self, origin, openid):
+            seen.append(openid)
+            return True
+
+        # 故意不放 identities：先走 Hub 的闸门就该直接放行
+    async def capture(origin, card, **kwargs):
+        return None
+
+    plugin._send_hub_card = capture
+    plugin._get_hub = lambda quiet=False: FakeHub()  # type: ignore[assignment]
+    assert asyncio.run(plugin._act_auto_off(FakeActionContext("ANYONE"), {})) == 0
+    assert seen == ["ANYONE"]
 
 
 # --- 配置校验 ---------------------------------------------------------------
@@ -525,3 +579,138 @@ def test_new_fields_are_visible_on_the_settings_page():
         "card_show_auto",
     ):
         assert key in FIELD_BY_KEY, key
+
+
+# --- 失败即关订阅（用户要求：别占着一个发不出去的档位）-----------------------
+
+class _BoomHub:
+    def __init__(self, message):
+        self.message = message
+
+    async def send_ephemeral_card(self, *a, **k):
+        raise RuntimeError(self.message)
+
+    async def send_image_message(self, *a, **k):
+        raise RuntimeError(self.message)
+
+
+def _make_push_fail(plugin, message, umo="umo:A"):
+    _add_meme(plugin, "a")
+    _subscribe(plugin, umo, "low")
+    plugin._get_hub = lambda quiet=False: _BoomHub(message)  # type: ignore[assignment]
+    plugin._read_file = lambda path: b"\xff\xd8\xff\xe0" + b"0" * 32  # 让它走到发送
+
+
+def test_no_permission_closes_the_subscription(plugin):
+    """群没开「机器人主动发言」→ 不能再留着每天白试。"""
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "low")
+    _make_push_fail(plugin, "40034105 主动消息失败, 无权限")
+    asyncio.run(plugin._auto_push_one("umo:A", day_key="2026-10-25"))
+
+    state = plugin.store.group_state("umo:A")
+    assert state["auto_level"] == ""
+    assert state["auto_off_reason"] == "no_permission"
+    assert state["auto_off_at"] > 0
+    assert state["auto_opt_out"] == 0  # 不是人关的，页面上要能区分
+
+
+def test_not_in_group_closes_the_subscription(plugin):
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "low")
+    _make_push_fail(plugin, "机器人不在群 群不存在")
+    asyncio.run(plugin._auto_push_one("umo:A", day_key="2026-10-25"))
+    assert plugin.store.group_state("umo:A")["auto_off_reason"] == "gone"
+
+
+def test_network_blip_does_not_close_the_subscription(plugin):
+    """网络抽风、素材库故障不该把订阅关掉 —— 关掉会让人以为功能坏了。"""
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "low")
+    _make_push_fail(plugin, "ConnectTimeout: 连接超时")
+    asyncio.run(plugin._auto_push_one("umo:A", day_key="2026-10-25"))
+    state = plugin.store.group_state("umo:A")
+    assert state["auto_level"] == "low"
+    assert state["auto_off_reason"] == ""
+
+
+def test_failure_classifier_table():
+    from meme_plugin_under_test.main import MemePlugin as P
+
+    assert P._classify_auto_failure("40034105 无权限") == "no_permission"
+    assert P._classify_auto_failure("主动消息失败") == "no_permission"
+    assert P._classify_auto_failure("群不存在") == "gone"
+    assert P._classify_auto_failure("invalid group openid") == "gone"
+    assert P._classify_auto_failure("连接超时") == ""
+    assert P._classify_auto_failure("") == ""
+
+
+# --- 批量铺开低档 -----------------------------------------------------------
+
+def test_bootstrap_opens_low_for_seen_groups(plugin):
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.touch_group("umo:B", "G2")
+    opened = asyncio.run(plugin._bootstrap_auto(force=True))
+    assert sorted(opened) == ["umo:A", "umo:B"]
+    assert plugin.store.group_state("umo:A")["auto_level"] == "low"
+
+
+def test_bootstrap_skips_already_subscribed_groups(plugin):
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "high")
+    assert asyncio.run(plugin._bootstrap_auto(force=True)) == []
+    assert plugin.store.group_state("umo:A")["auto_level"] == "high"
+
+
+def test_bootstrap_never_reopens_a_group_a_human_closed(plugin):
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "low")
+    plugin.store.set_auto_level("umo:A", "", opt_out=True, reason="manual")
+    assert asyncio.run(plugin._bootstrap_auto(force=True)) == []
+    assert plugin.store.group_state("umo:A")["auto_level"] == ""
+
+
+def test_bootstrap_never_retries_a_group_that_has_no_permission(plugin):
+    """自动关过的群（墓碑）不该每次重启都再试一遍。"""
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "low")
+    plugin.store.set_auto_level("umo:A", "", opt_out=False, reason="no_permission")
+    assert asyncio.run(plugin._bootstrap_auto(force=True)) == []
+    state = plugin.store.group_state("umo:A")
+    assert state["auto_level"] == "" and state["auto_off_reason"] == "no_permission"
+
+
+def test_bootstrap_ignores_stale_groups(plugin):
+    plugin.config["auto_push_bootstrap_days"] = 30
+    plugin.store.touch_group("umo:OLD", "G9")
+    # 把 last_seen 改成 100 天前
+    plugin.store._write(
+        "UPDATE groups SET last_seen = ? WHERE umo = ?", (1000.0 - 100 * 86400, "umo:OLD")
+    )
+    plugin.store.touch_group("umo:NEW", "G1")
+    assert asyncio.run(plugin._bootstrap_auto(force=True)) == ["umo:NEW"]
+
+
+def test_bootstrap_obeys_the_switch(plugin):
+    plugin.config["auto_push_bootstrap"] = False
+    plugin.store.touch_group("umo:A", "G1")
+    assert asyncio.run(plugin._bootstrap_auto()) == []
+    assert plugin.store.group_state("umo:A")["auto_level"] == ""
+
+
+def test_reopening_clears_the_tombstone(plugin):
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "", opt_out=False, reason="no_permission")
+    plugin.store.set_auto_level("umo:A", "mid")
+    state = plugin.store.group_state("umo:A")
+    assert state["auto_level"] == "mid"
+    assert state["auto_off_reason"] == "" and state["auto_opt_out"] == 0
+
+
+def test_auto_offed_groups_are_listed_for_the_panel(plugin):
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "low")
+    plugin.store.set_auto_level("umo:A", "", opt_out=False, reason="gone")
+    rows = plugin.store.auto_offed_groups()
+    assert [r["umo"] for r in rows] == ["umo:A"]
+    assert rows[0]["auto_off_reason"] == "gone"

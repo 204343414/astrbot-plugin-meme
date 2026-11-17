@@ -405,114 +405,20 @@ def test_parse_slots(plugin_module, raw, expected):
     assert plugin_module._parse_slots(raw) == expected
 
 
-def test_quiet_hours_within_same_day(plugin):
-    plugin.config["daily_push_quiet_start"] = "13:00"
-    plugin.config["daily_push_quiet_end"] = "14:00"
-    assert plugin._in_quiet_hours(dt.datetime(2026, 10, 25, 13, 30)) is True
-    assert plugin._in_quiet_hours(dt.datetime(2026, 10, 25, 15, 0)) is False
+# --- 每日推送已经删除 -------------------------------------------------------
+
+def test_daily_command_is_gone_and_points_at_the_new_feature(plugin):
+    """「/meme 每日」和自动搬石是同一个能力的两套实现，已删；
+    老用户敲这个词不能静默出错，要告诉他新入口在哪。"""
+    chunks = run(collect(plugin.meme_entry(FakeEvent(message_str="/meme 每日"))))
+    text = chunks[0][1]
+    assert "已经删掉" in text and "自动订阅" in text
+    assert plugin.store.group_state("qq_official:GroupMessage:G1") is None
 
 
-def test_quiet_hours_across_midnight(plugin):
-    plugin.config["daily_push_quiet_start"] = "23:00"
-    plugin.config["daily_push_quiet_end"] = "08:00"
-    assert plugin._in_quiet_hours(dt.datetime(2026, 10, 25, 23, 30)) is True
-    assert plugin._in_quiet_hours(dt.datetime(2026, 10, 25, 3, 0)) is True
-    assert plugin._in_quiet_hours(dt.datetime(2026, 10, 25, 12, 0)) is False
-
-
-def test_quiet_hours_disabled_when_unset(plugin):
-    assert plugin._in_quiet_hours(dt.datetime(2026, 10, 25, 3, 0)) is False
-
-
-# --- 每日推送 ---------------------------------------------------------------
-
-def test_daily_command_shows_state_and_requires_admin(plugin):
-    chunks = run(collect(plugin._do_daily(FakeEvent(), "")))
-    assert "关着" in chunks[0][1]
-    chunks = run(collect(plugin._do_daily(FakeEvent(sender_id="U1"), "9:00")))
-    assert "管理员" in chunks[0][1]
-
-
-def test_daily_command_enables_slots(plugin):
-    plugin.config["extra_admins"] = ["U1"]
-    chunks = run(collect(plugin._do_daily(FakeEvent(), "9:00,21:00")))
-    assert "已开" in chunks[0][1]
-    state = plugin.store.group_state("qq_official:GroupMessage:G1")
-    assert state["daily_enabled"] == 1
-    assert state["daily_slots"] == "09:00,21:00"
-
-
-def test_daily_command_can_be_turned_off(plugin):
-    plugin.config["extra_admins"] = ["U1"]
-    run(collect(plugin._do_daily(FakeEvent(), "9:00")))
-    chunks = run(collect(plugin._do_daily(FakeEvent(), "关")))
-    assert "已关" in chunks[0][1]
-    assert plugin.store.group_state("qq_official:GroupMessage:G1")["daily_enabled"] == 0
-
-
-def test_daily_push_marks_usage_and_counter(plugin, monkeypatch):
-    add_meme(plugin, "one")
-    umo = "qq_official:GroupMessage:G1"
-    plugin.store.touch_group(umo, "G1")
-    plugin.store.set_daily(umo, True, "09:00")
-
-    sent = {}
-
-    class FakeHub:
-        async def send_media_message(self, origin, data, file_type, text=""):
-            sent["file_type"] = file_type
-            sent["text"] = text
-            return "msg-1"
-
-    plugin._hub = FakeHub()
-    run(plugin._daily_push(umo))
-    assert sent["file_type"] == 1  # QQ 的「图片」编号
-    assert plugin.store.group_state(umo)["push_count"] == 1
-
-
-def test_daily_push_respects_per_day_cap(plugin):
-    add_meme(plugin, "one")
-    umo = "qq_official:GroupMessage:G1"
-    plugin.store.touch_group(umo, "G1")
-    plugin.store.set_daily(umo, True, "09:00")
-    plugin.config["daily_push_max_per_day"] = 0
-
-    class FakeHub:
-        async def send_media_message(self, *a, **k):
-            raise AssertionError("不该发")
-
-    plugin._hub = FakeHub()
-    run(plugin._daily_push(umo))
-
-
-def test_daily_push_skips_blocked_groups(plugin):
-    umo = "qq_official:GroupMessage:G1"
-    plugin.store.set_daily(umo, True, "09:00")
-    plugin.store.note_push(umo, ok=False, day_key="2026-10-25", blocked_until=9e9)
-
-    class FakeHub:
-        async def send_media_message(self, *a, **k):
-            raise AssertionError("不该发")
-
-    plugin._hub = FakeHub()
-    run(plugin._daily_push(umo))
-
-
-def test_permission_denied_blocks_group_for_a_day(plugin):
-    add_meme(plugin, "one")
-    umo = "qq_official:GroupMessage:G1"
-    plugin.store.touch_group(umo, "G1")
-    plugin.store.set_daily(umo, True, "09:00")
-
-    class NoPermissionHub:
-        async def send_media_message(self, *a, **k):
-            raise RuntimeError("40034105 主动消息失败, 无权限")
-
-    plugin._hub = NoPermissionHub()
-    plugin.context.send_message = None  # 让退路也失败
-    run(plugin._daily_push(umo))
-    state = plugin.store.group_state(umo)
-    assert state["blocked_until"] > 0
+def test_daily_push_code_is_removed(plugin):
+    for name in ("_daily_push", "_do_daily", "_reschedule_daily", "_in_quiet_hours"):
+        assert not hasattr(plugin, name), name
 
 
 # --- 自检（必须自己带图）---------------------------------------------------
