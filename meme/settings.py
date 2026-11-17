@@ -41,6 +41,18 @@ FIELDS: tuple[Field, ...] = (
     Field("send_cooldown_seconds", "同一个群的冷却（秒）", "int", 0, 600),
     Field("caption_limit", "图注字数上限", "int", 0, 500),
     Field("daily_push_max_per_day", "每群每天最多推几条", "int", 0, 20),
+    Field("card_enabled", "发梗图用卡片（带按钮）", "bool",
+          hint="关掉就退回纯图片；只有 QQ 官方号能显示按钮"),
+    Field("card_show_again", "卡片上显示「再来一张」", "bool"),
+    Field("card_show_howto", "卡片上显示「我要投稿」", "bool"),
+    Field("card_material_keep", "卡片图保留几张（素材额度）", "int", 5, 90,
+          hint="QQ 素材库每机器人 100 张；留太多会撞上限，留 60 左右合适"),
+    Field("submit_command_scope", "「/meme 投稿」收到哪里", "choice",
+          choices=("global", "group"),
+          hint="global = 公共库，别的群也刷得到；group = 只进本群"),
+    Field("ban_malicious_submitter", "恶意投稿永久禁止投稿", "bool",
+          hint="只针对故意投「能让 bot 被封号」的内容；地狱笑话、擦边、微恶俗不算"),
+    Field("ban_notify_group", "拉黑后在群里说一句", "bool"),
 )
 
 FLAG_CHOICES: tuple[tuple[str, str], ...] = (
