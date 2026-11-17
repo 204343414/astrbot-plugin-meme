@@ -76,6 +76,27 @@ CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL DEFAULT ''
 );
+
+-- 恶意投稿黑名单：按「人」拉黑，跨群生效。reason/evidence 都留着，事后能复盘。
+CREATE TABLE IF NOT EXISTS blacklist (
+    sender_id     TEXT PRIMARY KEY,
+    origin        TEXT NOT NULL DEFAULT '',
+    group_id      TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL DEFAULT '',
+    evidence_sha  TEXT NOT NULL DEFAULT '',
+    evidence_path TEXT NOT NULL DEFAULT '',
+    hits          INTEGER NOT NULL DEFAULT 0,
+    created_at    REAL NOT NULL DEFAULT 0
+);
+
+-- QQ 素材库额度记账：每发一张带图卡片就占一格（每机器人 100 张），
+-- 超出的旧素材要主动删，否则一百次之后就全线发不出图。
+CREATE TABLE IF NOT EXISTS card_materials (
+    image_id   TEXT PRIMARY KEY,
+    meme_id    INTEGER NOT NULL DEFAULT 0,
+    origin     TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -380,6 +401,79 @@ class MemeStore:
                     umo,
                 ),
             )
+
+    # --- 恶意投稿黑名单 ---------------------------------------------------
+
+    def add_blacklist(
+        self,
+        sender_id: str,
+        *,
+        origin: str = "",
+        group_id: str = "",
+        reason: str = "",
+        evidence_sha: str = "",
+        evidence_path: str = "",
+    ) -> bool:
+        """把一个人拉进「不许投稿」名单。已经在了就累计次数、刷新理由。"""
+        sender_id = str(sender_id or "").strip()
+        if not sender_id:
+            return False
+        now = self.now()
+        self._write(
+            """INSERT INTO blacklist
+                   (sender_id, origin, group_id, reason, evidence_sha, evidence_path, hits, created_at)
+               VALUES (?,?,?,?,?,?,1,?)
+               ON CONFLICT(sender_id) DO UPDATE SET
+                   reason = excluded.reason,
+                   evidence_sha = CASE WHEN excluded.evidence_sha != ''
+                                       THEN excluded.evidence_sha ELSE blacklist.evidence_sha END,
+                   evidence_path = CASE WHEN excluded.evidence_path != ''
+                                        THEN excluded.evidence_path ELSE blacklist.evidence_path END,
+                   hits = blacklist.hits + 1""",
+            (sender_id, origin, group_id, reason, evidence_sha, evidence_path, now),
+        )
+        return True
+
+    def blacklist_entry(self, sender_id: str) -> dict | None:
+        rows = self._rows(
+            "SELECT * FROM blacklist WHERE sender_id = ?", (str(sender_id or ""),)
+        )
+        return dict(rows[0]) if rows else None
+
+    def is_blacklisted(self, sender_id: str) -> bool:
+        return self.blacklist_entry(sender_id) is not None
+
+    def remove_blacklist(self, sender_id: str) -> bool:
+        cursor = self._write(
+            "DELETE FROM blacklist WHERE sender_id = ?", (str(sender_id or ""),)
+        )
+        return bool(cursor.rowcount)
+
+    def list_blacklist(self, limit: int = 50) -> list[dict]:
+        rows = self._rows(
+            "SELECT * FROM blacklist ORDER BY created_at DESC LIMIT ?", (int(limit),)
+        )
+        return [dict(row) for row in rows]
+
+    # --- 卡片素材额度 -----------------------------------------------------
+
+    def add_card_material(self, image_id: str, *, meme_id: int = 0, origin: str = "") -> None:
+        image_id = str(image_id or "").strip()
+        if not image_id:
+            return
+        self._write(
+            """INSERT INTO card_materials (image_id, meme_id, origin, created_at)
+               VALUES (?,?,?,?)
+               ON CONFLICT(image_id) DO UPDATE SET created_at = excluded.created_at""",
+            (image_id, int(meme_id), origin, self.now()),
+        )
+
+    def card_material_ids(self) -> list[str]:
+        rows = self._rows("SELECT image_id FROM card_materials ORDER BY created_at ASC")
+        return [row["image_id"] for row in rows]
+
+    def drop_card_material(self, image_id: str) -> None:
+        self._write("DELETE FROM card_materials WHERE image_id = ?", (str(image_id),))
 
     # --- 杂项 -------------------------------------------------------------
 

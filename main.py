@@ -21,6 +21,7 @@ import asyncio
 import base64
 import datetime as dt
 import importlib
+import inspect
 import os
 import random
 import time
@@ -40,6 +41,7 @@ from .meme.adapters import (
     fetch_bytes,
     resolve_provider_credentials,
 )
+from .meme.cards import ACTION_AGAIN, ACTION_HOWTO, build_howto_card, build_meme_card
 from .meme.chinese import MODE_APPEND, MODE_REDRAW, compose_caption
 from .meme.delivery import Attempt, deliver
 from .meme.models import SCOPE_GLOBAL, SCOPE_GROUP, MemeItem
@@ -56,12 +58,19 @@ COMMAND_NAMES = ("meme", "梗图", "来张梗图")
 MAX_IMAGES_PER_SUBMIT = 3
 #: QQ 富媒体里的「图片」编号。
 QQ_FILE_TYPE_IMAGE = 1
+
+#: 卡片素材保留几张。QQ 每个机器人总共 100 张（90 天），梗图每点一次换一张，
+#: 不回收约一百次就全线发不出图。留 60 张 ≈ 够翻回最近 60 次打卡，又留足余量。
+CARD_MATERIAL_KEEP = 60
+CARD_MATERIAL_KEEP_MAX = 90
 #: 收到「主动消息无权限」后，这个群多久之内不再试。
 PUSH_BLOCK_SECONDS = 24 * 3600
 
 HELP_TEXT = """梗图玩法：
 /meme —— 随机来一张（也可以发「梗图」「来张梗图」）
-发一张图并附上 /meme 收 —— 投稿（先审后收）
+/meme 再来 —— 再摇一张（卡片上那个按钮的同义命令）
+引用一张图、@我，然后 /meme 投稿 —— 投稿进公共库，别的群也刷得到
+发一张图并附上 /meme 收 —— 投稿给本群（先审后收）
 /meme 库 —— 看看这个群有多少张能发
 /meme 每日 —— 看每日推送状态
 /meme 每日 9:00,21:00 —— 每天这两个点自动发一张（管理员）
@@ -69,7 +78,24 @@ HELP_TEXT = """梗图玩法：
 /meme 删 <编号> —— 下架一张（管理员）
 /meme 审核 <编号> —— 重新审一次（管理员）
 /meme 拉 —— 立刻从第三方接口拉一张入库（管理员）
-/meme 测试 —— 用内置图跑一遍完整管线，看审核输出（管理员）"""
+/meme 测试 —— 用内置图跑一遍完整管线，看审核输出（管理员）
+/meme 黑名单 —— 看被永久禁止投稿的人（管理员）
+/meme 解禁 <用户ID> —— 恢复某人的投稿权限（管理员）"""
+
+
+def _image_size(data: bytes, default: int = 720) -> tuple[int, int]:
+    """图的宽高（卡片 markdown 的 alt 要带尺寸，否则 QQ 显示裂图）。
+
+    PIL 缺失或不是 PIL 认得的格式时退回正方形：尺寸只影响显示，不影响能不能发。
+    """
+    try:
+        from PIL import Image as _PILImage  # 延迟 import：没装 PIL 也要能跑
+        from io import BytesIO
+
+        with _PILImage.open(BytesIO(data)) as img:
+            return int(img.width), int(img.height)
+    except Exception:  # noqa: BLE001
+        return default, default
 
 
 def _looks_private_host(host: str) -> bool:
@@ -133,7 +159,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.2.2",
+    "0.3.0",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -168,6 +194,7 @@ class MemePlugin(Star):
         self._ensure_scheduler()
         self._reschedule_daily()
         self._register_web()
+        self._register_actions()
         logger.info(
             "[Meme] 就绪：数据目录 %s，中文化 %s，审核 Provider=%s（首次使用时解析："
             "AstrBot 是先加载插件、后加载 Provider 的）",
@@ -195,6 +222,7 @@ class MemePlugin(Star):
             except Exception:  # noqa: BLE001
                 logger.warning("[Meme] 关闭定时器时出错", exc_info=True)
             self._scheduler = None
+        self._unregister_actions()
         self._cooldowns.clear()
 
     def _resolve_data_dir(self) -> str:
@@ -278,7 +306,9 @@ class MemePlugin(Star):
         moderator = (
             ProviderVision(
                 vision,
-                build_review_prompt(policy.reject_flags, policy.nsfw_max_level),
+                build_review_prompt(
+                    policy.reject_flags, policy.nsfw_max_level, policy.ban_enabled
+                ),
             )
             if vision is not None
             else None
@@ -374,6 +404,211 @@ class MemePlugin(Star):
         except Exception:  # noqa: BLE001
             return QQ_FILE_TYPE_IMAGE
 
+    # --- 卡片（按钮）--------------------------------------------------------
+
+    def _register_actions(self) -> None:
+        """把卡片按钮的回调注册到 Hub。
+
+        Hub 只提供机制：按钮点下去是一张一次性卡片的事件，真正的"再来一张"
+        由我们的回调执行。没装 Hub / 是别的适配器时静默跳过 —— 卡片本来也
+        只有 QQ 官方号能用，其它平台走纯文本。
+        """
+        hub = self._get_hub(quiet=True)
+        if hub is None or not hasattr(hub, "actions"):
+            logger.info("[Meme] 没有 QQ Official Hub，按钮卡片不可用（纯文本照常）")
+            return
+        try:
+            ActionSpec = self._hub_module(hub, "action_registry").ActionSpec
+            hub.actions.register(ActionSpec(
+                action_id=ACTION_AGAIN,
+                title="梗图：再来一张",
+                description="由梗图卡片上的「再来一张」按钮触发。",
+                owner=PLUGIN_NAME,
+                default_permission="everyone",
+                callback=self._act_again,
+            ))
+            hub.actions.register(ActionSpec(
+                action_id=ACTION_HOWTO,
+                title="梗图：我要投稿",
+                description="由梗图卡片上的「我要投稿」按钮触发，回一张投稿说明卡。",
+                owner=PLUGIN_NAME,
+                default_permission="everyone",
+                callback=self._act_howto,
+            ))
+            logger.info("[Meme] 已注册 2 个卡片按钮动作（%s、%s）", ACTION_AGAIN, ACTION_HOWTO)
+        except Exception:  # noqa: BLE001
+            logger.warning("[Meme] 注册卡片按钮动作失败（卡片会退化成无按钮）", exc_info=True)
+
+    def _unregister_actions(self) -> None:
+        hub = getattr(self, "_hub", None)
+        if hub is None or not hasattr(hub, "actions"):
+            return
+        try:
+            hub.actions.unregister_owner(PLUGIN_NAME)
+        except Exception:  # noqa: BLE001
+            logger.debug("[Meme] 注销卡片动作失败", exc_info=True)
+
+    def _card_enabled(self) -> bool:
+        return bool(self.cfg.get("card_enabled", True))
+
+    async def _act_again(self, context, params) -> int:
+        """点「再来一张」：和打 /meme 走同一条路（同样吃冷却、同样记账）。
+
+        冷却算在**点按钮的人**头上，所以同一个人连点会被劝退，别人点不受影响。
+        """
+        origin = str(getattr(context, "origin", "") or "")
+        sender = str(getattr(context, "member_openid", "") or "")
+        group_id = ""
+        parts = origin.split(":")
+        if len(parts) >= 3 and "GroupMessage" in origin:
+            group_id = parts[-1]
+        wait = self._cooldown_left(origin, sender) or self._group_cooldown_left(origin)
+        if wait > 0:
+            # ACK 4 = 无权限：群里会看到一句「暂时不能点」的提示，而不是按钮没反应
+            return 4
+        item = await asyncio.to_thread(self.pipeline.pick, group_id, self._weights())
+        if item is None:
+            return 3
+        self._touch_cooldowns(origin, sender)
+        await asyncio.to_thread(self.store.mark_used, item.id)
+        try:
+            await self._send_item_by_origin(origin, item, context=context)
+        except Exception:  # noqa: BLE001
+            logger.warning("[Meme] 按钮「再来一张」发送失败", exc_info=True)
+            return 1
+        return 0
+
+    async def _act_howto(self, context, params) -> int:
+        """点「我要投稿」：回一张说明卡，告诉对方怎么投、投了谁会看到。"""
+        hub = self._get_hub(quiet=True)
+        if hub is None:
+            return 1
+        try:
+            await self._send_hub_card(
+                context.origin,
+                build_howto_card(show_again=self._show_again()),
+                context=context,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("[Meme] 按钮「我要投稿」失败", exc_info=True)
+            return 1
+        return 0
+
+    def _show_again(self) -> bool:
+        return bool(self.cfg.get("card_show_again", True))
+
+    def _show_howto(self) -> bool:
+        return bool(self.cfg.get("card_show_howto", True))
+
+    async def _send_hub_card(
+        self, origin: str, card: dict, *, context=None, msg_id: str = ""
+    ) -> None:
+        """发一张卡片。
+
+        必须做成**被动回复**，否则就是群主动消息 —— QQ 对主动消息的额度极小，
+        而且群里看不到「是谁触发的」。两条被动通道：
+          * 按钮点击 → ``event_id``（INTERACTION_CREATE 带的那个）；
+          * 群友发命令 → ``msg_id``（就当是回复他这条消息）。
+        """
+        hub = self._get_hub()
+        if hub is None:
+            raise RuntimeError("QQ Official Hub 不可用")
+        kwargs: dict[str, Any] = {"client": getattr(context, "client", None)}
+        if msg_id:
+            kwargs["msg_id"] = msg_id
+        if context is not None:
+            try:
+                passive = self._hub_module(hub, "passive_reply").passive_event_id
+                kwargs["event_id"] = passive(context.interaction)
+            except Exception:  # noqa: BLE001
+                kwargs["event_id"] = None
+            kwargs["initiator_openid"] = getattr(context, "member_openid", "") or ""
+        # 卡片里的图就是内容本身：转存失败时宁可明确报错再降级，也不要发裂图
+        if "verify_image" in inspect.signature(hub.send_ephemeral_card).parameters:
+            kwargs["verify_image"] = bool(card.get("markdown", "").count("![梗图"))
+        await hub.send_ephemeral_card(origin, card, **kwargs)
+
+    async def _release_material(self, hub, image_id: str, *, origin: str = "") -> None:
+        """删掉一张素材。失败只损失额度，不影响发图，因此只记 debug。"""
+        cleaner = getattr(hub, "delete_image_material", None)
+        if cleaner is None or not image_id:
+            return
+        try:
+            await cleaner(image_id, origin=origin)
+        except Exception:  # noqa: BLE001
+            logger.debug("[Meme] 回收素材失败 %s", image_id, exc_info=True)
+        finally:
+            await asyncio.to_thread(self.store.drop_card_material, image_id)
+
+    async def _trim_materials(self, hub, *, origin: str = "") -> None:
+        """按配置裁剪素材数量，最旧的先走。"""
+        keep = self._cfg_int("card_material_keep", CARD_MATERIAL_KEEP)
+        keep = max(5, min(keep, CARD_MATERIAL_KEEP_MAX))
+        ids = await asyncio.to_thread(self.store.card_material_ids)
+        for stale in ids[: max(0, len(ids) - keep)]:
+            await self._release_material(hub, stale, origin=origin)
+
+    async def _send_card_item(
+        self, origin: str, item: MemeItem, data: bytes, *, context=None, msg_id: str = ""
+    ) -> bool:
+        """发一张带按钮的梗图卡片。成功返回 True，任何一环失败返回 False。
+
+        来源优先级（每一步失败就往下走，全部失败才交给调用方发纯图片）：
+          1. QQ 素材库（``qqbot-media://``）—— 不依赖公网地址，首选；
+          2. Hub 图床的公网 URL —— 老路子，素材库不可用时兜底。
+        """
+        hub = self._get_hub(quiet=True)
+        if hub is None or not hasattr(hub, "send_ephemeral_card"):
+            return False
+        width, height = _image_size(data)
+
+        candidates: list[tuple[str, str]] = []  # (图片地址, 素材 id)
+        upload = getattr(hub, "publish_image_material", None)
+        if upload is not None:
+            try:
+                material = await upload(data, origin=origin)
+                if material.get("url"):
+                    candidates.append((str(material["url"]), str(material.get("image_id") or "")))
+            except Exception as exc:  # noqa: BLE001
+                logger.info("[Meme] 素材库上传失败，改试图床：%s", exc)
+        if not candidates:
+            publisher = getattr(hub, "publish_image_checked", None)
+            if publisher is not None:
+                try:
+                    url = await publisher(data, slot=f"meme:{origin}")
+                    if url:
+                        candidates.append((str(url), ""))
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("[Meme] 图床也不可用：%s", exc)
+        if not candidates:
+            return False
+
+        caption_limit = self._cfg_int("caption_limit", 160)
+        for url, image_id in candidates:
+            card = build_meme_card(
+                item,
+                url,
+                caption_limit=caption_limit,
+                show_again=self._show_again(),
+                show_howto=self._show_howto(),
+                width=width,
+                height=height,
+            )
+            try:
+                await self._send_hub_card(origin, card, context=context, msg_id=msg_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Meme] 带图卡片被拒（%s）：%s", url.split("?")[0], exc)
+                if image_id:
+                    await self._release_material(hub, image_id, origin=origin)
+                continue
+            if image_id:
+                await asyncio.to_thread(
+                    self.store.add_card_material, image_id, meme_id=item.id, origin=origin
+                )
+                await self._trim_materials(hub, origin=origin)
+            return True
+        return False
+
     # --- 命令入口 -----------------------------------------------------------
 
     @filter.command("meme", alias={"梗图", "来张梗图"})
@@ -394,7 +629,13 @@ class MemePlugin(Star):
                 yield result
             return
 
-        if sub in ("收", "投稿", "submit"):
+        if sub in ("投稿", "submit", "public"):
+            # 卡片上教的写法：进公共库，别的群也能刷到
+            async for result in self._do_submit(event, images, public=True):
+                yield result
+            return
+
+        if sub in ("收", "收图"):
             async for result in self._do_submit(event, images):
                 yield result
             return
@@ -418,6 +659,14 @@ class MemePlugin(Star):
                 yield result
             return
 
+        if sub in ("黑名单", "黑名单列表", "bans"):
+            yield await self._do_blacklist(event)
+            return
+
+        if sub in ("解禁", "解封", "unban"):
+            yield await self._do_unban(event, rest)
+            return
+
         if sub in ("拉", "fetch"):
             async for result in self._do_fetch_api(event):
                 yield result
@@ -429,7 +678,8 @@ class MemePlugin(Star):
             return
 
         if sub:
-            # 不认识的子命令：当作闲聊输入，直接发一张，别骂用户
+            # 不认识的子命令（含「再来」「再来一张」这种给不能点按钮的客户端的
+            # 同义写法）：当作闲聊输入，直接发一张，别骂用户
             pass
 
         result = await self._do_random(event)
@@ -466,6 +716,19 @@ class MemePlugin(Star):
         return await self._send_item(event, item)
 
     async def _send_item(self, event: AstrMessageEvent, item: MemeItem):
+        return await self._send_item_by_origin(event.unified_msg_origin, item, event=event)
+
+    async def _send_item_by_origin(
+        self, origin: str, item: MemeItem, *, event=None, context=None
+    ):
+        """把一张图发出去：优先卡片（带按钮），否则按顺序降级。
+
+        降级链（每一级失败只写一行日志，群里绝不见报错）：
+          ① 卡片 + 素材库/图床嵌图 + 两个按钮
+          ② 图片消息 + 紧跟一张无图卡片（图放不进去，但按钮还在）
+          ③ 纯图片消息（现状）
+          ④ 纯文字（连图都读不出来时的最后兜底）
+        """
         caption = compose_caption(
             item.caption, item.caption_zh, self._cfg_int("caption_limit", 160)
         )
@@ -475,37 +738,108 @@ class MemePlugin(Star):
             logger.warning("[Meme] 读图失败 #%s: %s", item.id, exc)
             data = b""
 
-        hub = self._get_hub(quiet=True)
-        if data and hub is not None:
+        msg_id = ""
+        if event is not None:
+            msg_id = str(
+                getattr(getattr(event, "message_obj", None), "message_id", "") or ""
+            )
+
+        if data and self._card_enabled():
             try:
-                await hub.send_image_message(
-                    event.unified_msg_origin, data, text=caption
+                if await self._send_card_item(
+                    origin, item, data, context=context, msg_id=msg_id
+                ):
+                    return None
+            except Exception:  # noqa: BLE001
+                logger.warning("[Meme] 卡片发送失败，降级", exc_info=True)
+            # ② 图 + 无图卡片（只有 Hub 在才做得到，它同时负责发图）
+            try:
+                if self._get_hub(quiet=True) is None:
+                    raise RuntimeError("没有 Hub")
+                await self._send_image_now(origin, data, caption)
+                await self._send_hub_card(
+                    origin,
+                    build_meme_card(
+                        item, "", caption_limit=self._cfg_int("caption_limit", 160),
+                        show_again=self._show_again(), show_howto=self._show_howto(),
+                        note="<font color='grey'>（这张图走的是降级发送，按钮照常可用）</font>",
+                    ),
+                    context=context,
+                    msg_id=msg_id,
                 )
                 return None
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[Meme] Hub 发图失败，改用原生：%s", exc)
+                logger.warning("[Meme] 图+无图卡片失败：%s", exc)
 
         if data:
-            chain: list[Any] = [Image.fromFileSystem(item.file_path)]
-            if caption:
-                chain.append(Plain(caption))
-            return event.chain_result(chain)
+            return await self._send_image_now(origin, data, caption, item=item, event=event)
         return event.plain_result(
             f"这张图现在发不出来（#{item.id}）" + (f"\n{caption}" if caption else "")
         )
 
+    async def _send_image_now(
+        self, origin: str, data: bytes, caption: str, *, item=None, event=None
+    ):
+        """一张纯图片消息。
+
+        先走 Hub（QQ 官方号上这是唯一稳妥的路），Hub 不行才退 AstrBot 原生。
+        原生那条**返回**结果对象让命令层去 yield，不在这里 ``event.send`` ——
+        命令 handler 的返回值才是 AstrBot 真正发出去的东西，自己 send 再返回
+        空就是"发两次"或"一次都没发"。
+        """
+        hub = self._get_hub(quiet=True)
+        if hub is not None:
+            try:
+                await hub.send_image_message(origin, data, text=caption)
+                return None
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Meme] Hub 发图失败，改用原生：%s", exc)
+        if event is not None:
+            chain: list[Any] = []
+            if item is not None and os.path.isfile(item.file_path):
+                chain.append(Image.fromFileSystem(item.file_path))
+            else:
+                chain.append(Image.fromURL("base64://" + base64.b64encode(data).decode()))
+            if caption:
+                chain.append(Plain(caption))
+            return event.chain_result(chain)
+        raise RuntimeError("没有可用的图片发送通道")
+
     # --- 投稿 ---------------------------------------------------------------
 
-    async def _do_submit(self, event: AstrMessageEvent, images: list) -> Any:
+    async def _do_submit(
+        self, event: AstrMessageEvent, images: list, *, public: bool = False
+    ) -> Any:
+        """投稿。
+
+        ``public=True`` 对应 ``/meme 投稿``（卡片上那个按钮教的写法）：图进**公共
+        库**，别的群也刷得到。``/meme 收`` 保持老行为，按配置的
+        ``submission_scope``（默认只本群）。
+        """
         if not images:
             yield event.plain_result(
-                "投稿方式：把图发出来，同一条消息里带上「/meme 收」。"
+                "投稿方式：发图时引用它、@我，然后输入「/meme 投稿」。\n"
+                "（老写法「/meme 收」也还能用，只是那种只进本群。）"
             )
             return
         umo = event.unified_msg_origin
         group_id = event.get_group_id() or ""
         sender = str(event.get_sender_id() or "")
-        scope = str(self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP)
+
+        # 被拉黑的人连审核都不跑：省一次模型调用，也让他知道拒的是"人"不是"图"
+        ban = await asyncio.to_thread(self.store.blacklist_entry, sender)
+        if ban is not None:
+            logger.info("[Meme] 已拉黑的人尝试投稿：%s（%s）", sender, ban.get("reason", ""))
+            yield event.plain_result("你的投稿权限已被关闭，这张不会入库。")
+            return
+
+        if public:
+            scope = str(self.cfg.get("submit_command_scope", SCOPE_GLOBAL) or SCOPE_GLOBAL)
+        else:
+            scope = str(self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP)
+        if scope not in (SCOPE_GROUP, SCOPE_GLOBAL):
+            scope = SCOPE_GROUP
+
         limit = self._cfg_int("daily_submit_limit", 10)
         used = self._submit_used_today(umo, sender)
         if limit and used >= limit:
@@ -517,6 +851,7 @@ class MemePlugin(Star):
 
         lines: list[str] = []
         accepted = 0
+        banned = False
         for component in images[:MAX_IMAGES_PER_SUBMIT]:
             try:
                 data = await self._component_bytes(component)
@@ -534,12 +869,119 @@ class MemePlugin(Star):
                 accepted += 1
                 tag = "重画成中文版" if outcome.redrawn else "已入库"
                 dup = "（早就有了）" if outcome.duplicate else ""
-                lines.append(f"#{outcome.meme.id} {tag}{dup}：{outcome.reason}")
+                where = "公共库，别的群也刷得到" if scope == SCOPE_GLOBAL else "本群"
+                lines.append(f"#{outcome.meme.id} {tag}{dup}（进{where}）：{outcome.reason}")
             else:
                 lines.append(f"没收：{outcome.reason}")
+            if outcome.banned:
+                banned = await self._ban_submitter(
+                    event, sender, outcome.ban_reason or outcome.reason, data
+                )
+                break  # 已经定性了，这一批里后面的图不用再跑
         if accepted:
             self._note_submit(umo, sender)
+        if banned:
+            lines.append("投稿人已被永久禁止投稿。")
         yield event.plain_result("\n".join(lines) or "没收到图")
+
+    async def _do_blacklist(self, event: AstrMessageEvent):
+        if not self._is_admin(event):
+            return event.plain_result("只有管理员能看黑名单")
+        entries = await asyncio.to_thread(self.store.list_blacklist, 20)
+        if not entries:
+            return event.plain_result("还没有人被禁止投稿。")
+        lines = [f"禁止投稿的人（{len(entries)} 个）："]
+        for entry in entries:
+            when = dt.datetime.fromtimestamp(entry.get("created_at") or 0).strftime("%m-%d %H:%M")
+            lines.append(
+                f"· {entry['sender_id']}（{when}，累计 {entry.get('hits', 1)} 次）："
+                f"{entry.get('reason', '')}"
+            )
+        lines.append("恢复某人：/meme 解禁 <用户ID>")
+        return event.plain_result("\n".join(lines))
+
+    async def _do_unban(self, event: AstrMessageEvent, rest: str):
+        if not self._is_admin(event):
+            return event.plain_result("只有管理员能解禁")
+        sender = rest.strip()
+        if not sender:
+            return event.plain_result("用法：/meme 解禁 <用户ID>（先用 /meme 黑名单 查）")
+        removed = await asyncio.to_thread(self.store.remove_blacklist, sender)
+        if not removed:
+            return event.plain_result(f"{sender} 不在黑名单里")
+        return event.plain_result(f"已恢复 {sender} 的投稿权限")
+
+    # --- 拉黑 ---------------------------------------------------------------
+
+    async def _ban_submitter(
+        self, event: AstrMessageEvent, sender: str, reason: str, data: bytes
+    ) -> bool:
+        """执行永久禁止投稿。
+
+        判定由审核模型给出（``Review.ban_submitter``），这里只做三件事：
+        管理员豁免、把证据图留一份、写进黑名单。
+
+        **只关掉这个人在本插件的投稿权**，不碰他在群里正常聊天 —— 拉黑的
+        初衷是"别再往库里塞能让 bot 封号的东西"，不是替他禁言。
+        """
+        if not bool(self.cfg.get("ban_malicious_submitter", True)):
+            logger.info("[Meme] 模型建议拉黑 %s，但配置里关了这个开关：%s", sender, reason)
+            return False
+        if self._is_admin(event):
+            logger.info("[Meme] %s 是管理员，不拉黑（只拒收这张图）", sender)
+            return False
+        if not sender:
+            return False
+
+        sha = ""
+        evidence_path = ""
+        try:
+            from .meme.media import sha256_of
+
+            sha = sha256_of(data)
+            evidence_path = await asyncio.to_thread(self._save_quarantine, sha, data)
+        except Exception:  # noqa: BLE001
+            logger.debug("[Meme] 留证据图失败", exc_info=True)
+
+        await asyncio.to_thread(
+            self.store.add_blacklist,
+            sender,
+            origin=event.unified_msg_origin,
+            group_id=event.get_group_id() or "",
+            reason=(reason or "恶意投稿")[:300],
+            evidence_sha=sha,
+            evidence_path=evidence_path,
+        )
+        logger.warning(
+            "[Meme] 已永久禁止投稿 sender=%s 群=%s 理由=%s 证据=%s",
+            sender, event.get_group_id() or "-", reason, evidence_path or "(未存)",
+        )
+        if bool(self.cfg.get("ban_notify_group", True)):
+            try:
+                await self.context.send_message(
+                    event.unified_msg_origin,
+                    self._plain_chain(
+                        "这张不收：投稿内容属于故意投递违规图，该投稿人已被永久禁止投稿。"
+                    ),
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("[Meme] 拉黑通知发送失败", exc_info=True)
+        return True
+
+    def _save_quarantine(self, sha256: str, data: bytes) -> str:
+        """把被判恶意的图另存一份（不进梗图库、不会被抽到）。"""
+        folder = os.path.join(self.data_dir, "quarantine")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, (sha256[:16] or "unknown") + ".img")
+        if not os.path.isfile(path):
+            with open(path, "wb") as fh:
+                fh.write(data)
+        return path
+
+    def _plain_chain(self, text: str):
+        from astrbot.core.message.message_event_result import MessageChain
+
+        return MessageChain().message(text)
 
     # --- 库 / 删 / 审 -------------------------------------------------------
 
@@ -1358,7 +1800,7 @@ class MemePlugin(Star):
 
         payload = export_settings(self.cfg)
         payload["originLabels"] = ORIGIN_LABELS
-        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.2.2"}
+        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.3.0"}
         return payload
 
     async def web_save_settings(self, values: dict) -> dict:

@@ -132,9 +132,15 @@ class MemePipeline:
 
         review = await self.review_bytes(data, mime)
         accepted, why = judge(review, self.policy)
+        # 拉黑意图与"这张收不收"是两件事：模型可能既判违规又判恶意，
+        # 也可能只判恶意（罕见）。两个结论都往上带，由命令层决定要不要执行。
+        ban = bool(getattr(review, "ban_submitter", False))
         if not accepted:
             self.store.reject(sha256, why, contributor)
-            return IngestResult(ok=False, reason=why, review=review)
+            return IngestResult(
+                ok=False, reason=why, review=review,
+                banned=ban, ban_reason=getattr(review, "ban_reason", "") or why,
+            )
 
         caption = review.caption_text
         caption_zh = ""
@@ -183,6 +189,8 @@ class MemePipeline:
             review=review,
             redrawn=redrawn,
             duplicate=not created,
+            banned=ban,
+            ban_reason=getattr(review, "ban_reason", "") if ban else "",
             reason=("重画成中文版后入库" if redrawn else "已入库"),
         )
 

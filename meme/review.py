@@ -42,13 +42,37 @@ PROMPT_HEAD = """你是群聊里的梗图审核员。看这张图，只输出一
 - "language": 图中文字的主要语言，用 ISO 代码，如 "zh"、"en"、"ja"；
   没有文字或无法判断就给空字符串。
 - "reason": 一句话说明判断理由，不超过 30 字。
+- "ban_submitter": 布尔。**只有**这一种情况给 true：投稿人显然在故意投「让机器人
+  因为违规被封号」的内容（见下面清单）。其余一律 false。
+- "ban_reason": 给 true 时用一句中文说明是哪种恶意，不超过 30 字；否则空字符串。
 
 只输出 JSON。"""
+
+
+#: 「什么才算要拉黑」的判定边界。正反例都写死，因为永久拉黑不可逆：
+#: 模型自己发挥会把地狱笑话、擦边、微恶俗全判成恶意，误杀是收不回来的。
+BAN_RULES = """关于 ban_submitter，判据只有一条：**投稿人是不是在故意投能让这个机器人被封号的内容**。
+给 true 的（同时 ban_reason 写清是哪一种）：
+- 真实时政敏感：具体政治事件/人物/标语，且图本身就是冲着传播这个去的；
+- 露骨色情：性器官、性行为特写、幼态性化；
+- 真实血腥：尸体、伤口、真实伤害画面（不是画出来的梗图）；
+- 违法/暴恐宣传、赌博枪支毒品引流、诈骗话术；
+- 明显钓封号：同一张图连续投、或明知会被拒还换个名字继续投。
+
+**以下一律 false（最多按上面的类别拒收，绝不拉黑）**：
+- 地狱笑话、黑色幽默、丧文化（骷髅、「想死」式自嘲）；
+- 擦边：露肩、短裤、卖萌、暧昧台词；
+- 微恶俗：屎尿屁、谐音脏字、表情包式粗口；
+- 政治谐音梗：拿颜色/地图/谐音玩梗，没有真实时政内容；
+- 让人不适但合法的怪图：蟑螂、密集恐惧、精神污染。
+
+拿不准就 false。宁可漏掉一个坏人，也不要把群友永久禁掉。"""
 
 
 def build_review_prompt(
     reject_flags: tuple[str, ...] = DEFAULT_REJECT_FLAGS,
     nsfw_max_level: int = 1,
+    ban_enabled: bool = True,
 ) -> str:
     """把策略写进提示词。
 
@@ -65,6 +89,9 @@ def build_review_prompt(
     ]
     if reject_flags:
         rules.append("- 以下类别会被直接丢弃：" + "、".join(reject_flags))
+    if ban_enabled:
+        rules.append("")
+        rules.append(BAN_RULES)
     return head + "\n".join(rules)
 
 
@@ -119,6 +146,19 @@ def _coerce_level(value) -> int:
     return max(0, min(4, level))
 
 
+def _coerce_flag(value) -> bool:
+    """模型很爱把布尔写成字符串：``"true"`` / ``"是"`` / ``1`` 都要认。
+
+    只认这几个明确的「真」，其余（包括 ``"false"``、空、None）都是 false ——
+    这个字段一旦误判就是把群友永久拉黑，宁可漏不可错。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return str(value or "").strip().lower() in {"true", "yes", "y", "1", "是"}
+
+
 def parse_review(text: str) -> Review:
     """模型回话 → Review。解析不出来就标 ``parsed=False``，绝不假装通过。"""
     data = extract_json_object(text)
@@ -140,6 +180,8 @@ def parse_review(text: str) -> Review:
         caption_text=str(data.get("caption_text", "") or "").strip()[:200],
         language=str(data.get("language", "") or "").strip().lower()[:16],
         parsed=True,
+        ban_submitter=_coerce_flag(data.get("ban_submitter")),
+        ban_reason=str(data.get("ban_reason", "") or "").strip()[:60],
     )
 
 
@@ -151,6 +193,8 @@ class ReviewPolicy:
     reject_flags: tuple[str, ...] = DEFAULT_REJECT_FLAGS
     require_is_meme: bool = True
     fail_closed: bool = True
+    #: 提示词里要不要带「什么算恶意投稿」那张表。关掉 = 模型不会给拉黑建议。
+    ban_enabled: bool = True
 
     @classmethod
     def from_config(cls, config) -> "ReviewPolicy":
@@ -163,6 +207,7 @@ class ReviewPolicy:
             reject_flags=flags,
             require_is_meme=bool(config.get("require_is_meme", True)),
             fail_closed=bool(config.get("moderation_fail_closed", True)),
+            ban_enabled=bool(config.get("ban_malicious_submitter", True)),
         )
 
 

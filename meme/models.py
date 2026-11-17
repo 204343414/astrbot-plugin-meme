@@ -89,6 +89,10 @@ class Review:
     language: str = ""
     parsed: bool = True
     error: str = ""
+    #: 模型认为「这个投稿人是故意的、想让 bot 因违规被封号」。真正的动作在
+    #: 服务端执行（见 main.py 的 _ban_submitter），模型只负责举手。
+    ban_submitter: bool = False
+    ban_reason: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +104,8 @@ class Review:
             "language": self.language,
             "parsed": self.parsed,
             "error": self.error,
+            "ban_submitter": self.ban_submitter,
+            "ban_reason": self.ban_reason,
         }
 
     def to_json(self) -> str:
@@ -120,6 +126,8 @@ class Review:
             language=str(data.get("language", "") or ""),
             parsed=bool(data.get("parsed", True)),
             error=str(data.get("error", "") or ""),
+            ban_submitter=bool(data.get("ban_submitter", False)),
+            ban_reason=str(data.get("ban_reason", "") or "")[:60],
         )
 
     @classmethod
@@ -141,4 +149,7 @@ class IngestResult:
     redrawn: bool = False
     cached: bool = False
     duplicate: bool = False
+    #: 审核模型点了「拉黑」工具。是否真的执行由命令层决定（管理员豁免等）。
+    banned: bool = False
+    ban_reason: str = ""
     extra: dict = field(default_factory=dict)

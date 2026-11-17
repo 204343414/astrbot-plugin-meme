@@ -271,5 +271,53 @@
     "title": "数据目录（一般不用填）",
     "description": "图库和数据库放哪儿。留空 = 用 AstrBot 官方的 data/plugin_data/astrbot_plugin_meme（重装插件也不丢）。别指到插件源码目录里——重装会一起没。",
     "default": ""
+  },
+  "card_enabled": {
+    "type": "bool",
+    "title": "发梗图用卡片（带按钮）",
+    "default": true,
+    "description": "开着的时候，每张梗图会做成一张卡片：图下面有「再来一张」「我要投稿」两个按钮。关掉就退回纯图片消息。只有 QQ 官方号能显示按钮，其他适配器自动退回纯图。"
+  },
+  "card_show_again": {
+    "type": "bool",
+    "title": "卡片上显示「再来一张」",
+    "default": true,
+    "description": "按钮点了就等于再打一次 /meme，同样算冷却，防止一个人连点刷屏。"
+  },
+  "card_show_howto": {
+    "type": "bool",
+    "title": "卡片上显示「我要投稿」",
+    "default": true,
+    "description": "按钮点了会回一张说明卡，告诉对方「引用图片 + @我 + 输入 /meme 投稿」。"
+  },
+  "card_material_keep": {
+    "type": "int",
+    "title": "卡片图保留几张（素材库额度）",
+    "default": 60,
+    "min": 5,
+    "max": 90,
+    "description": "QQ 素材库每个机器人只有 100 张、90 天。梗图每发一次就占一格，所以插件会自动删掉最旧的，这个数字就是留多少张。留得多能翻回更早的卡片，但别贴着 100 填，留点余量。"
+  },
+  "submit_command_scope": {
+    "type": "string",
+    "title": "/meme 投稿 收到哪里",
+    "options": [
+      "global",
+      "group"
+    ],
+    "default": "global",
+    "description": "global = 卡片教的「/meme 投稿」把图放进公共库，别的群也能刷到（默认）。group = 只进本群库。老的「/meme 收」不受这个开关影响，永远按上面「投稿图的可见范围」走。"
+  },
+  "ban_malicious_submitter": {
+    "type": "bool",
+    "title": "恶意投稿永久禁止投稿",
+    "default": true,
+    "description": "审核模型会多看一步：这人是故意投「能让机器人被封号」的内容吗（真实时政敏感、露骨色情、真实血腥、违法宣传、连环钓封号）。判到就永久关掉他的投稿权限，并在数据目录 quarantine/ 留一张证据图。地狱笑话、擦边、微恶俗不在此列，照收。管理员不会被禁。"
+  },
+  "ban_notify_group": {
+    "type": "bool",
+    "title": "拉黑后在群里说一句",
+    "default": true,
+    "description": "开着的话，执行拉黑后群里会收到一句「这张不收：投稿内容属于故意投递违规图，该投稿人已被永久禁止投稿」。不想公开说就关掉，只写日志。"
   }
 }
