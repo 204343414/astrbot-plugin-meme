@@ -30,7 +30,10 @@
     "type": "string",
     "title": "投稿图的可见范围",
     "description": "说白了：群友投的图，是只在这个群能刷到（group，默认），还是所有群共用（global）。选 group 更稳妥——别人投的图在别的群出现，容易引出转图和版权的事。",
-    "options": ["group", "global"],
+    "options": [
+      "group",
+      "global"
+    ],
     "default": "group"
   },
   "daily_submit_limit": {
@@ -61,6 +64,12 @@
     "default": 30.0,
     "min": 5.0
   },
+  "http_proxy": {
+    "type": "string",
+    "title": "出站代理（留空 = 跟 AstrBot 一致）",
+    "description": "说白了：插件自己发请求时走哪个代理。留空就用 AstrBot 全局配置里的 http_proxy——容器里一般都是靠它在出网，填错的表现是「拉图失败 / 重画超时」，日志里写着 Network is unreachable。",
+    "default": ""
+  },
   "moderation_provider_id": {
     "type": "string",
     "title": "审核用多模态 Provider",
@@ -81,7 +90,13 @@
     "type": "list",
     "title": "直接拒收的类别",
     "description": "说白了：只按「类别」拦，不搞关键词黑名单——梗图的文字本来就是谐音错别字，关键词表一边误杀一边漏。可选项：sexual 色情、minor 未成年、gore 血腥、violence 打斗、politics 现实政治、hate 歧视、ads_or_watermark 广告/二维码/水印、text_heavy 文字太多、other 其他。留空列表 = 只靠色情等级判断。",
-    "default": ["gore", "politics", "ads_or_watermark", "minor", "hate"]
+    "default": [
+      "gore",
+      "politics",
+      "ads_or_watermark",
+      "minor",
+      "hate"
+    ]
   },
   "require_is_meme": {
     "type": "bool",
@@ -99,7 +114,11 @@
     "type": "string",
     "title": "英文梗图怎么变中文",
     "description": "说白了：off = 啥也不做；append = 只把图里的英文抄下来翻成中文，挂在图下面那条消息里（默认，便宜、不动画面、100% 成功）；redraw = 真的调画图模型重画一张中文版（贵、慢，模型不保证「其他不要改动」，所以重画完要再审一次）。",
-    "options": ["off", "append", "redraw"],
+    "options": [
+      "off",
+      "append",
+      "redraw"
+    ],
     "default": "append"
   },
   "translate_provider_id": {
@@ -138,7 +157,13 @@
     "type": "string",
     "title": "重绘质量",
     "description": "说白了：auto 让接口自己决定；low 便宜快，high 慢且贵。只翻几个字的话 low 其实够。",
-    "options": ["", "auto", "low", "medium", "high"],
+    "options": [
+      "",
+      "auto",
+      "low",
+      "medium",
+      "high"
+    ],
     "default": ""
   },
   "redraw_recheck": {
@@ -212,7 +237,10 @@
     "type": "list",
     "title": "默认推送时间",
     "description": "说白了：群主第一次用 /meme 每日 没写时间时，就用这里的时间点。格式是 HH:MM，可以写多个。",
-    "default": ["09:00", "21:00"]
+    "default": [
+      "09:00",
+      "21:00"
+    ]
   },
   "daily_push_quiet_start": {
     "type": "string",

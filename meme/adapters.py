@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import base64
-import json
+import inspect
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +15,37 @@ from typing import Any
 import httpx
 
 logger = logging.getLogger(__name__)
+
+#: httpx 0.26 起 ``proxy`` 单数，之前叫 ``proxies``。容器里两种都可能。
+_PROXY_KW = "proxy" if "proxy" in inspect.signature(
+    httpx.AsyncClient.__init__
+).parameters else "proxies"
+
+
+def client_kwargs(timeout: float, proxy: str = "") -> dict[str, Any]:
+    """给 httpx 的构造参数。
+
+    代理必须显式传：容器里的出站流量基本都靠 AstrBot 的 ``http_proxy``
+    （``172.18.0.1:7890`` 这类地址）转发，而 httpx 默认读环境变量、环境变量
+    又常常是空的。不传就等于直连 —— 表现是 ``Network is unreachable``，
+    看起来像接口挂了，其实是根本没出门。
+    """
+    kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
+    proxy = (proxy or "").strip()
+    if proxy:
+        kwargs[_PROXY_KW] = proxy
+    return kwargs
+
+
+def _build_client(timeout: float, proxy: str = "") -> httpx.AsyncClient:
+    kwargs = client_kwargs(timeout, proxy)
+    try:
+        return httpx.AsyncClient(**kwargs)
+    except TypeError:  # 版本不认这个参数名
+        kwargs.pop(_PROXY_KW, None)
+        if proxy:
+            kwargs["proxies"] = proxy
+        return httpx.AsyncClient(**kwargs)
 
 
 # --- 多模态：审核 / 翻译 ----------------------------------------------------
@@ -169,12 +200,14 @@ class OpenAIImageGenerator:
         quality: str = "",
         timeout: float = 120.0,
         use_generations_fallback: bool = True,
+        proxy: str = "",
     ) -> None:
         self.credentials = credentials
         self.size = size
         self.quality = quality
         self.timeout = timeout
         self.use_generations_fallback = use_generations_fallback
+        self.proxy = proxy
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.credentials.api_key}"}
@@ -187,7 +220,7 @@ class OpenAIImageGenerator:
         if self.quality:
             form["quality"] = self.quality
         files = {"image": ("meme.png", data, "image/png")}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with _build_client(self.timeout, self.proxy) as client:
             response = await client.post(
                 self._url("images/edits"), headers=self._headers(), data=form, files=files
             )
@@ -198,7 +231,7 @@ class OpenAIImageGenerator:
         body = {"model": self.credentials.model, "prompt": prompt, "size": self.size, "n": 1}
         if self.quality:
             body["quality"] = self.quality
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with _build_client(self.timeout, self.proxy) as client:
             response = await client.post(
                 self._url("images/generations"), headers=self._headers(), json=body
             )
@@ -228,8 +261,13 @@ class OpenAIImageGenerator:
 # --- HTTP 抓取 --------------------------------------------------------------
 
 
-async def fetch_bytes(url: str, timeout: float = 30.0, headers: dict | None = None) -> bytes:
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+async def fetch_bytes(
+    url: str,
+    timeout: float = 30.0,
+    headers: dict | None = None,
+    proxy: str = "",
+) -> bytes:
+    async with _build_client(timeout, proxy) as client:
         response = await client.get(url, headers=headers or {})
     response.raise_for_status()
     return response.content
@@ -242,16 +280,23 @@ class JsonApiImageSource:
     302 到一张图）。
     """
 
-    def __init__(self, url: str, json_path: str = "", timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        json_path: str = "",
+        timeout: float = 30.0,
+        proxy: str = "",
+    ) -> None:
         self.url = url
         self.json_path = json_path
         self.timeout = timeout
+        self.proxy = proxy
 
     async def fetch(self) -> tuple[bytes, str]:
         """``(图片字节, 来源 URL)``。"""
         if not self.url:
             raise RuntimeError("没有配置第三方接口地址")
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
+        async with _build_client(self.timeout, self.proxy) as client:
             response = await client.get(self.url)
             response.raise_for_status()
             content_type = response.headers.get("content-type", "")

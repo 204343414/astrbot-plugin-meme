@@ -225,6 +225,7 @@ class MemePlugin(Star):
                     size=str(self.cfg.get("redraw_size", "1024x1024") or "1024x1024"),
                     quality=str(self.cfg.get("redraw_quality", "") or ""),
                     timeout=self._cfg_float("redraw_timeout_seconds", 120.0),
+                    proxy=self._proxy(),
                 )
             else:
                 logger.warning("[Meme] 中文化选了 redraw 但没选画图 Provider，将只做字幕翻译")
@@ -530,6 +531,22 @@ class MemePlugin(Star):
             return
         yield event.plain_result(f"已入库 #{item.id}：{item.caption or '（无文字）'}")
 
+    def _proxy(self) -> str:
+        """出站代理。
+
+        容器里访问外网基本都要经过宿主机那个代理（AstrBot 配置的
+        ``http_proxy``）；httpx 默认只看环境变量，而容器里往往一个都没有，
+        结果是裸连直接被 ``Network is unreachable`` 打回。插件自己发的请求
+        （拉图、下载投稿图、调画图接口）必须显式带上它。
+        """
+        own = str(self.cfg.get("http_proxy", "") or "").strip()
+        if own:
+            return own
+        try:
+            return str(self.context.get_config().get("http_proxy", "") or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
     def _api_configured(self) -> bool:
         return bool(str(self.cfg.get("third_party_api_url", "") or "").strip())
 
@@ -538,6 +555,7 @@ class MemePlugin(Star):
             str(self.cfg.get("third_party_api_url", "") or "").strip(),
             str(self.cfg.get("third_party_api_json_path", "") or "").strip(),
             self._cfg_float("third_party_api_timeout_seconds", 30.0),
+            proxy=self._proxy(),
         )
 
     async def _fetch_api_meme(self, group_id: str) -> MemeItem | None:
@@ -844,7 +862,9 @@ class MemePlugin(Star):
         if url:
             try:
                 return await fetch_bytes(
-                    url, self._cfg_float("download_timeout_seconds", 30.0)
+                    url,
+                    self._cfg_float("download_timeout_seconds", 30.0),
+                    proxy=self._proxy(),
                 )
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(f"下载失败（{type(exc).__name__}）") from exc

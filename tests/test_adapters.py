@@ -174,3 +174,38 @@ def test_dig_handles_nested_and_list_paths():
     assert _dig(payload, "data.9.url") is None
     assert _dig(payload, "nope.url") is None
     assert _dig(payload, "") is payload
+
+
+# --- 代理 -------------------------------------------------------------------
+
+def test_client_kwargs_includes_proxy_when_given():
+    from meme.adapters import client_kwargs
+
+    kwargs = client_kwargs(30.0, "http://172.18.0.1:7890")
+    assert "http://172.18.0.1:7890" in kwargs.values()
+    assert kwargs["timeout"] == 30.0
+    assert kwargs["follow_redirects"] is True
+
+
+def test_client_kwargs_is_bare_without_proxy():
+    from meme.adapters import client_kwargs
+
+    kwargs = client_kwargs(5.0, "")
+    assert kwargs["timeout"] == 5.0
+    # 没有代理就不该出现代理参数（空串会覆盖掉环境变量里的代理）
+    assert not any(k in kwargs for k in ("proxy", "proxies"))
+
+
+def test_generator_keeps_the_proxy_for_its_requests():
+    generator = OpenAIImageGenerator(
+        Credentials(api_base="https://x/v1", api_key="k", model="m"),
+        proxy="http://127.0.0.1:7890",
+    )
+    assert generator.proxy == "http://127.0.0.1:7890"
+
+
+def test_json_source_keeps_the_proxy():
+    from meme.adapters import JsonApiImageSource
+
+    source = JsonApiImageSource("https://x/api", "data.url", proxy="http://p:1")
+    assert source.proxy == "http://p:1"
