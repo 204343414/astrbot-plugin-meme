@@ -606,7 +606,11 @@ class MemePlugin(Star):
         hour_key = now.strftime("%Y%m%d%H")
         previous = slots.get(umo)
         if previous is None or previous[0] != hour_key:
-            slots[umo] = (hour_key, self._rng.randint(0, 59))
+            # 第一次见到这个小时（正常是整点那一分钟，插件半夜重启时则可能是任意分钟）。
+            # 抽签分钟不能抽到「已经过去」的时刻，否则这个群这一小时就白等 ——
+            # 重启会静默吃掉一次机会，这种偏差很难看出来。
+            low = min(now.minute, 59)
+            slots[umo] = (hour_key, self._rng.randint(low, 59))
             previous = slots[umo]
         return now.minute == previous[1]
 

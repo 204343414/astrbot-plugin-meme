@@ -78,9 +78,9 @@ class FixedRandom:
         self.calls = []
 
     def randint(self, a, b):
-        """`randint(0, 59)` 是抽签分钟；`randint(1, 100)` 是掷骰。"""
+        """上界 59 的是「抽签分钟」（下界会被抬到当前分钟），上界 100 的是掷骰。"""
         self.calls.append(("randint", a, b))
-        return self.minute if a == 0 else self.roll
+        return self.minute if b == 59 else self.roll
 
     def __getattr__(self, name):
         return getattr(random, name)
@@ -257,6 +257,15 @@ def test_each_group_gets_a_random_minute_per_hour(plugin):
     # 下一个小时：重新抽签
     plugin._rng.minute = 42
     assert plugin._auto_now_minute_matches("umo:A", dt.datetime(2026, 10, 25, 11, 42)) is True
+
+
+def test_late_start_never_draws_a_minute_already_past(plugin):
+    """插件在 12:40 才启动：这一小时的抽签分钟不能抽到 12:10，否则白等一小时。"""
+    plugin._rng = FixedRandom(minute=10)  # 假随机源「想给」10，但它没机会被采纳
+    moment = dt.datetime(2026, 10, 25, 12, 40)
+    plugin._auto_now_minute_matches("umo:A", moment)
+    # 关键：下界被抬到 40，真实的 randint(40, 59) 不可能返回已经过去的分钟
+    assert plugin._rng.calls[-1] == ("randint", 40, 59)
 
 
 # --- 整条抽签 ---------------------------------------------------------------
