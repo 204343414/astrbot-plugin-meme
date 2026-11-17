@@ -160,7 +160,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.3.0",
+    "0.3.1",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -554,7 +554,12 @@ class MemePlugin(Star):
             await asyncio.to_thread(self.store.drop_card_material, image_id)
 
     async def _trim_materials(self, hub, *, origin: str = "") -> None:
-        """按配置裁剪素材数量，最旧的先走。"""
+        """按配置裁剪素材数量，最久没用过的先走。
+
+        注意：删素材**不影响已经发出去的消息**（平台发消息时已把图转存了一份），
+        所以这里回收只关乎"还能继续发多少新卡片"。QQ 上限 100 张，超了是
+        **新的上传被拒**（40035007），不会挤掉旧的。
+        """
         keep = self._cfg_int("card_material_keep", CARD_MATERIAL_KEEP)
         keep = max(5, min(keep, CARD_MATERIAL_KEEP_MAX))
         ids = await asyncio.to_thread(self.store.card_material_ids)
@@ -574,7 +579,47 @@ class MemePlugin(Star):
         if hub is None or not hasattr(hub, "send_ephemeral_card"):
             return False
         width, height = _image_size(data)
+        caption_limit = self._cfg_int("caption_limit", 160)
 
+        async def try_card(url: str) -> bool:
+            card = build_meme_card(
+                item,
+                url,
+                caption_limit=caption_limit,
+                show_again=self._show_again(),
+                show_howto=self._show_howto(),
+                width=width,
+                height=height,
+            )
+            try:
+                await self._send_hub_card(origin, card, context=context, msg_id=msg_id)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Meme] 带图卡片被拒（%s）：%s", url.split("?")[0], exc)
+                return False
+
+        # ① 这张图传过吗？传过就直接用旧的引用 —— 一张图只占一格额度，
+        #    90 天不用的会被平台回收（40035009），那时这张卡会发失败，
+        #    下面会自动退回去重传。
+        sha256 = ""
+        try:
+            from .meme.media import sha256_of
+
+            sha256 = sha256_of(data)
+        except Exception:  # noqa: BLE001
+            sha256 = ""
+        cached = await asyncio.to_thread(self.store.material_for_sha, sha256) if sha256 else None
+        if cached and str(cached.get("url") or ""):
+            age = self._cfg_int("card_material_reuse_days", 80) * 86400
+            fresh = (time.time() - float(cached.get("last_used") or 0)) < age
+            if fresh and await try_card(str(cached["url"])):
+                await asyncio.to_thread(self.store.touch_material, cached["image_id"])
+                return True
+            # 过期或已被平台删掉：把这条记账清掉，走重新上传
+            logger.info("[Meme] 素材 #%s 已失效（或超过复用期），重新上传", cached.get("image_id"))
+            await asyncio.to_thread(self.store.drop_material_by_sha, sha256)
+
+        # ② 新上传：素材库优先，图床兜底
         candidates: list[tuple[str, str]] = []  # (图片地址, 素材 id)
         upload = getattr(hub, "publish_image_material", None)
         if upload is not None:
@@ -596,27 +641,19 @@ class MemePlugin(Star):
         if not candidates:
             return False
 
-        caption_limit = self._cfg_int("caption_limit", 160)
         for url, image_id in candidates:
-            card = build_meme_card(
-                item,
-                url,
-                caption_limit=caption_limit,
-                show_again=self._show_again(),
-                show_howto=self._show_howto(),
-                width=width,
-                height=height,
-            )
-            try:
-                await self._send_hub_card(origin, card, context=context, msg_id=msg_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[Meme] 带图卡片被拒（%s）：%s", url.split("?")[0], exc)
+            if not await try_card(url):
                 if image_id:
                     await self._release_material(hub, image_id, origin=origin)
                 continue
             if image_id:
                 await asyncio.to_thread(
-                    self.store.add_card_material, image_id, meme_id=item.id, origin=origin
+                    self.store.add_card_material,
+                    image_id,
+                    meme_id=item.id,
+                    origin=origin,
+                    sha256=sha256,
+                    url=url,
                 )
                 await self._trim_materials(hub, origin=origin)
             return True
@@ -1905,7 +1942,7 @@ class MemePlugin(Star):
 
         payload = export_settings(self.cfg)
         payload["originLabels"] = ORIGIN_LABELS
-        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.3.0"}
+        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.3.1"}
         return payload
 
     async def web_save_settings(self, values: dict) -> dict:

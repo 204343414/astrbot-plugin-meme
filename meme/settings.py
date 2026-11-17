@@ -47,6 +47,8 @@ FIELDS: tuple[Field, ...] = (
     Field("card_show_howto", "卡片上显示「我要投稿」", "bool"),
     Field("card_material_keep", "卡片图保留几张（素材额度）", "int", 5, 90,
           hint="QQ 素材库每机器人 100 张；留太多会撞上限，留 60 左右合适"),
+    Field("card_material_reuse_days", "同一张图复用几天", "int", 1, 89,
+          hint="QQ 引用 90 天没被用到才失效；留 80 天，失效了会自动重传"),
     Field("submit_command_scope", "「/meme 投稿」收到哪里", "choice",
           choices=("global", "group"),
           hint="global = 公共库，别的群也刷得到；group = 只进本群"),

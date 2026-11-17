@@ -116,9 +116,9 @@ def test_howto_card_teaches_the_exact_command():
 
 # --- 素材额度 ---------------------------------------------------------------
 
-def jpeg_bytes(size=(64, 64)) -> bytes:
+def jpeg_bytes(color=(30, 90, 200), size=(64, 64)) -> bytes:
     buffer = io.BytesIO()
-    Image.new("RGB", size, (30, 90, 200)).save(buffer, "JPEG")
+    Image.new("RGB", size, color).save(buffer, "JPEG")
     return buffer.getvalue()
 
 
@@ -199,7 +199,8 @@ class FakeContext:
         self.sent.append(umo)
 
 
-def test_card_send_records_material_and_trims(plugin):
+def test_many_different_images_get_trimmed(plugin):
+    """8 张不同的图 → 8 个素材格，只保留最近 5 个，最旧的 3 个被回收。"""
     instance, _context = plugin
     hub = FakeHub()
     instance._hub = hub
@@ -207,11 +208,11 @@ def test_card_send_records_material_and_trims(plugin):
 
     import asyncio
 
-    for _ in range(8):
-        asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), jpeg_bytes()))
+    for index in range(8):
+        data = jpeg_bytes(color=(index * 20, 90, 200))
+        assert asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), data)) is True
 
     assert len(hub.cards) == 8
-    # 保留最近 5 张，最旧的 3 张被回收
     assert sorted(hub.deleted) == ["img1", "img2", "img3"]
     assert instance.store.card_material_ids() == ["img4", "img5", "img6", "img7", "img8"]
 
@@ -304,3 +305,99 @@ def test_card_probe_without_hub(plugin):
 
     report = asyncio.run(instance.web_card_probe())
     assert report["ok"] is False and "Hub" in report["message"]
+
+
+# --- 素材复用：一张图只占一格额度 ---------------------------------------
+
+def test_same_image_reuses_its_material(plugin):
+    """同一张梗图再发一次，不该再上传一张（否则 100 格额度按「发送次数」被吃掉）。
+
+    QQ 素材库是「一个引用用很多次」，不是「一条消息一格」。
+    """
+    instance, _context = plugin
+    hub = FakeHub()
+    instance._hub = hub
+    data = jpeg_bytes()
+
+    import asyncio
+
+    for _ in range(5):
+        assert asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), data)) is True
+
+    assert hub.materials == ["img1"], "第二次以后应当复用引用，不该再上传"
+    assert len(hub.cards) == 5
+    assert all("qqbot-media://image/v1/img1" in card["markdown"] for card in hub.cards)
+
+
+def test_two_different_images_take_two_slots(plugin):
+    instance, _context = plugin
+    hub = FakeHub()
+    instance._hub = hub
+
+    import asyncio
+
+    asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), jpeg_bytes(color=(5, 120, 30))))
+    asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), jpeg_bytes(color=(200, 9, 9))))
+    assert hub.materials == ["img1", "img2"]
+
+
+def test_expired_reference_is_reuploaded(plugin):
+    """平台 90 天后会把没人用的引用回收（40035009）：那张卡发失败时要自动重传。
+
+    这条是"不静默"的关键 —— 不然一个失效引用会被反复用下去，每次都是裂图。
+    """
+    import asyncio
+
+    instance, _context = plugin
+    data = jpeg_bytes()
+
+    first = FakeHub()
+    instance._hub = first
+    assert asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), data)) is True
+    assert first.materials == ["img1"]
+
+    class ExpiringHub(FakeHub):
+        """第一次发送时抛 40035009（模拟平台把这张引用回收了），之后正常。
+
+        只针对「复用旧引用」的那一次：重传之后（哪怕 id 又排到 img1）必须放行，
+        否则测的就不是"重传"，而是"这频道永远发不出去"。
+        """
+
+        expired_once = False
+
+        async def send_ephemeral_card(self, origin, card, **kwargs):
+            if not self.expired_once:
+                self.expired_once = True
+                raise RuntimeError("40035009 图片已过期")
+            self.cards.append(card)
+            return "s"
+
+    second = ExpiringHub()
+    instance._hub = second
+    assert asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), data)) is True
+    assert len(second.materials) == 1, "旧引用失效后应当重新上传，而不是放弃这张卡"
+    assert second.cards, "重传之后这张卡必须发出去"
+
+
+def test_stale_cache_is_ignored_without_asking_qq(plugin):
+    """记账里超过复用天数（默认 80 天，留 10 天余量）的引用直接不用。"""
+    instance, _context = plugin
+    hub = FakeHub()
+    instance._hub = hub
+    data = jpeg_bytes()
+
+    import asyncio
+
+    asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), data))
+    from meme.media import sha256_of
+
+    sha = sha256_of(data)
+    entry = instance.store.material_for_sha(sha)
+    old = entry["last_used"] - 90 * 86400
+    instance.store._write("UPDATE card_materials SET last_used = ? WHERE image_id = ?",
+                          (old, entry["image_id"]))
+    hub.materials.clear()
+    hub.materials.append("img2")
+    asyncio.run(instance._send_card_item("qq:GroupMessage:G1", item(), data))
+    assert instance.store.material_for_sha(sha)
+    assert "img2" in hub.cards[-1]["markdown"]

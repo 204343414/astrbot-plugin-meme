@@ -95,8 +95,12 @@ CREATE TABLE IF NOT EXISTS card_materials (
     image_id   TEXT PRIMARY KEY,
     meme_id    INTEGER NOT NULL DEFAULT 0,
     origin     TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL DEFAULT 0
+    created_at REAL NOT NULL DEFAULT 0,
+    sha256     TEXT NOT NULL DEFAULT '',
+    url        TEXT NOT NULL DEFAULT '',
+    last_used  REAL NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_card_materials_sha ON card_materials(sha256);
 """
 
 
@@ -119,6 +123,18 @@ class MemeStore:
         os.makedirs(self.media_dir, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            # 老库补列：素材复用（按 sha256 认回已经传过的那张）是后加的
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(card_materials)")}
+            for name, ddl in (
+                ("sha256", "TEXT NOT NULL DEFAULT ''"),
+                ("url", "TEXT NOT NULL DEFAULT ''"),
+                ("last_used", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE card_materials ADD COLUMN {name} {ddl}")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_card_materials_sha ON card_materials(sha256)"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=15)
@@ -465,19 +481,66 @@ class MemeStore:
 
     # --- 卡片素材额度 -----------------------------------------------------
 
-    def add_card_material(self, image_id: str, *, meme_id: int = 0, origin: str = "") -> None:
+    def add_card_material(
+        self,
+        image_id: str,
+        *,
+        meme_id: int = 0,
+        origin: str = "",
+        sha256: str = "",
+        url: str = "",
+    ) -> None:
         image_id = str(image_id or "").strip()
         if not image_id:
             return
         self._write(
-            """INSERT INTO card_materials (image_id, meme_id, origin, created_at)
-               VALUES (?,?,?,?)
-               ON CONFLICT(image_id) DO UPDATE SET created_at = excluded.created_at""",
-            (image_id, int(meme_id), origin, self.now()),
+            """INSERT INTO card_materials
+                   (image_id, meme_id, origin, created_at, sha256, url, last_used)
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(image_id) DO UPDATE SET
+                   created_at = excluded.created_at,
+                   sha256 = excluded.sha256,
+                   url = excluded.url,
+                   last_used = excluded.last_used""",
+            (
+                image_id,
+                int(meme_id),
+                origin,
+                self.now(),
+                sha256,
+                url,
+                self.now(),
+            ),
         )
 
+    def material_for_sha(self, sha256: str) -> dict | None:
+        """同一张图传过一次就认回来，别再占一格额度。
+
+        QQ 素材库是「一张引用用很多次」，不是「一条消息一格」。所以按内容
+        sha256 复用，是这套额度管理里最省的一招：库里 30 张图，最多只占 30 格。
+        """
+        if not sha256:
+            return None
+        rows = self._rows(
+            """SELECT * FROM card_materials WHERE sha256 = ?
+               ORDER BY last_used DESC LIMIT 1""",
+            (sha256,),
+        )
+        return dict(rows[0]) if rows else None
+
+    def touch_material(self, image_id: str) -> None:
+        self._write(
+            "UPDATE card_materials SET last_used = ? WHERE image_id = ?",
+            (self.now(), str(image_id)),
+        )
+
+    def drop_material_by_sha(self, sha256: str) -> None:
+        self._write("DELETE FROM card_materials WHERE sha256 = ?", (str(sha256),))
+
     def card_material_ids(self) -> list[str]:
-        rows = self._rows("SELECT image_id FROM card_materials ORDER BY created_at ASC")
+        rows = self._rows(
+            "SELECT image_id FROM card_materials ORDER BY COALESCE(last_used, created_at) ASC"
+        )
         return [row["image_id"] for row in rows]
 
     def drop_card_material(self, image_id: str) -> None:
