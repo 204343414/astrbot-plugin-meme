@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>梗图库</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="titles">
+        <h1>梗图库</h1>
+        <p id="subtitle">正在读取…</p>
+      </div>
+      <div class="topbar-actions">
+        <select id="groupFilter" title="只看某个群的视角">
+          <option value="">全部群视角</option>
+        </select>
+        <button id="refresh" class="ghost">刷新</button>
+        <button id="toggleSettings" class="ghost">调参</button>
+      </div>
+    </header>
+
+    <section class="stats" aria-label="统计">
+      <div class="stat"><b id="statGroup">0</b><span>本群可用</span></div>
+      <div class="stat"><b id="statTotal">0</b><span>全库</span></div>
+      <div class="stat"><b id="statRejected">0</b><span>已拒收</span></div>
+      <div class="stat"><b id="statMode">—</b><span>中文化模式</span></div>
+      <div class="stat"><b id="statProvider">—</b><span>审核 Provider</span></div>
+    </section>
+
+    <section id="dropzone" class="dropzone" tabindex="0">
+      <input id="fileInput" type="file" accept="image/*" multiple hidden />
+      <div class="drop-main">
+        <svg viewBox="0 0 24 24" aria-hidden="true" class="drop-icon"><path d="M12 16V4m0 0L8 8m4-4 4 4M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+        <div>
+          <strong>把图片拖进来</strong>
+          <p>或者 <button class="link" id="pickFiles" type="button">点这里选文件</button>；支持一次拖多张。</p>
+        </div>
+      </div>
+      <div class="drop-options">
+        <label class="switch">
+          <input type="checkbox" id="optSkipReview" checked />
+          <span>免审入库<em>不看审核模型，直接进库（省一次调用）</em></span>
+        </label>
+        <label class="select-label">
+          可见范围
+          <select id="optScope">
+            <option value="group">只本群（group）</option>
+            <option value="global">全局共用（global）</option>
+          </select>
+        </label>
+      </div>
+      <div id="uploadLog" class="upload-log" aria-live="polite"></div>
+    </section>
+
+    <section id="settings" class="settings hidden" aria-label="调参">
+      <div class="settings-head">
+        <h2>调参</h2>
+        <p>改完点保存即刻生效（会重建审核管线），不用重启。</p>
+      </div>
+      <div id="settingsBody" class="settings-grid"></div>
+      <div class="settings-foot">
+        <button id="saveSettings">保存</button>
+        <button id="resetSettings" class="ghost">还原成已保存的值</button>
+        <span id="settingsMsg" class="msg" aria-live="polite"></span>
+      </div>
+      <div id="readonlyBox" class="readonly"></div>
+    </section>
+
+    <section class="toolbar">
+      <div id="originChips" class="chips"></div>
+      <div class="toolbar-right">
+        <input id="search" type="search" placeholder="搜图注 / 编号 / 投稿人" />
+        <select id="sort">
+          <option value="new">最新入库</option>
+          <option value="stale">最久没发</option>
+          <option value="warm">发得最多</option>
+        </select>
+        <select id="statusFilter">
+          <option value="all">全部状态</option>
+          <option value="active">只在用</option>
+          <option value="disabled">只停用</option>
+        </select>
+      </div>
+    </section>
+
+    <section id="grid" class="grid" aria-live="polite"></section>
+    <div class="more-wrap"><button id="loadMore" class="ghost hidden">加载更多</button></div>
+  </main>
+
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-body">
+      <button id="modalClose" class="modal-close" aria-label="关闭">×</button>
+      <img id="modalImage" alt="" />
+      <div id="modalInfo" class="modal-info"></div>
+      <div id="modalActions" class="modal-actions"></div>
+    </div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

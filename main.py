@@ -103,7 +103,7 @@ def _parse_slots(text: str) -> list[str]:
     PLUGIN_NAME,
     "204343414",
     "每日梗图：随机梗图 + 投稿审核 + 英图中文化 + 每日推送",
-    "0.1.1",
+    "0.2.0",
     "https://github.com/204343414/astrbot-plugin-meme",
 )
 class MemePlugin(Star):
@@ -124,6 +124,7 @@ class MemePlugin(Star):
         self._group_cooldowns: dict[str, float] = {}
         self._hub = None
         self._scheduler = None
+        self._web = None
         self._rng = random.Random()
 
     # --- 启动 / 收尾 --------------------------------------------------------
@@ -136,6 +137,7 @@ class MemePlugin(Star):
             logger.info("[Meme] 内置种子图入库 %s 张", added)
         self._ensure_scheduler()
         self._reschedule_daily()
+        self._register_web()
         logger.info(
             "[Meme] 就绪：数据目录 %s，中文化 %s，审核 Provider=%s（首次使用时解析："
             "AstrBot 是先加载插件、后加载 Provider 的）",
@@ -143,6 +145,18 @@ class MemePlugin(Star):
             self.config.get("caption_zh_mode", MODE_APPEND),
             self.cfg.get("moderation_provider_id", "") or "未配（投稿会被拒收）",
         )
+
+    def _register_web(self) -> None:
+        """挂上后台页面用的接口（失败了也只是页面不可用，命令照常）。"""
+        try:
+            from .web import MemeWebUI
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Meme] 页面接口不可用：%s", exc)
+            return
+        if getattr(self, "_web", None) is not None:
+            return
+        self._web = MemeWebUI(self.context, self)
+        self._web.register()
 
     async def terminate(self) -> None:
         if self._scheduler is not None:
@@ -970,3 +984,327 @@ class MemePlugin(Star):
     def _note_submit(self, umo: str, sender: str) -> None:
         key = self._submit_day_key(umo, sender)
         self.store.set_meta(key, str(self._submit_used_today(umo, sender) + 1))
+
+
+    # --- 网页后台（pages/meme）-----------------------------------------------
+
+    def _thumbs_dir(self) -> str:
+        return os.path.join(self.data_dir, "thumbs")
+
+    def _thumb_of(self, item) -> str:
+        from .meme.thumbs import GALLERY_THUMB, data_url, read_thumb
+
+        try:
+            raw = read_thumb(item.file_path, item.sha256, self._thumbs_dir(), GALLERY_THUMB)
+        except (OSError, MemoryError):
+            return ""
+        return data_url(raw)
+
+    async def web_state(
+        self,
+        *,
+        origin: str = "",
+        query: str = "",
+        sort: str = "",
+        status: str = "",
+        group_id: str = "",
+        limit: int = 24,
+        offset: int = 0,
+    ) -> dict:
+        """页面首屏要的一切：候选图一页 + 统计 + 来源分布 + 群列表。"""
+        from .meme.gallery import (
+            SORT_NEW,
+            build_gallery,
+            build_origin_breakdown,
+            filter_items,
+            sort_items,
+        )
+
+        stats = await asyncio.to_thread(self.store.stats, group_id)
+        items = await asyncio.to_thread(self.store.random_pool, group_id)
+        # 已下架的也要能在页面上看见（否则「删掉的图」在界面里凭空消失）
+        disabled = [
+            item
+            for item in await asyncio.to_thread(self.store.recent, 200, group_id)
+            if item.status != "active"
+        ]
+        everything = {item.id: item for item in list(items) + list(disabled)}
+        pool = filter_items(
+            everything.values(), origin=origin, query=query, status=status or "all"
+        )
+        pool = sort_items(pool, sort or SORT_NEW)
+        page = build_gallery(
+            pool,
+            total=stats["total"],
+            stats=stats,
+            thumb_of=self._thumb_of,
+            file_exists=lambda path: bool(path) and os.path.isfile(path),
+            limit=limit,
+            offset=offset,
+        )
+        page["origins"] = build_origin_breakdown(everything.values())
+        page["sort"] = sort or SORT_NEW
+        page["filters"] = {"origin": origin or "all", "q": query, "status": status or "all"}
+        page["running"] = {
+            "captionMode": str(self.cfg.get("caption_zh_mode", "") or ""),
+            "moderationProvider": str(self.cfg.get("moderation_provider_id", "") or ""),
+            "proxy": self._proxy(),
+            "dataDir": self.data_dir,
+        }
+        page["groups"] = await asyncio.to_thread(self._known_groups)
+        return page
+
+    def _known_groups(self) -> list[dict]:
+        """见过面的群（页面上的「按群筛选」用）。"""
+        try:
+            rows = self.store._rows("SELECT * FROM groups")  # noqa: SLF001 - 只读一处
+        except Exception:  # noqa: BLE001
+            return []
+        result = []
+        for row in rows:
+            record = dict(row)
+            result.append(
+                {
+                    "umo": record.get("umo", ""),
+                    "groupId": record.get("group_id", ""),
+                    "dailyEnabled": bool(record.get("daily_enabled")),
+                    "dailySlots": record.get("daily_slots", ""),
+                    "blockedUntil": float(record.get("blocked_until") or 0),
+                    "lastPush": float(record.get("last_push") or 0),
+                    "pushCount": int(record.get("push_count") or 0),
+                }
+            )
+        return sorted(result, key=lambda item: item["groupId"])
+
+    async def web_detail(self, raw_id: str) -> dict | None:
+        from .meme.thumbs import PREVIEW_SIZE, data_url, read_thumb
+
+        try:
+            meme_id = int(str(raw_id).lstrip("#"))
+        except ValueError:
+            return None
+        item = await asyncio.to_thread(self.store.get, meme_id)
+        if item is None:
+            return None
+        try:
+            raw = await asyncio.to_thread(
+                read_thumb, item.file_path, item.sha256, self._thumbs_dir(), PREVIEW_SIZE
+            )
+            image = data_url(raw)
+        except OSError:
+            image = ""
+        return {
+            "id": item.id,
+            "image": image,
+            "mime": item.mime,
+            "origin": item.origin,
+            "scope": item.scope,
+            "status": item.status,
+            "caption": item.caption,
+            "captionZh": item.caption_zh,
+            "tags": list(item.tags),
+            "nsfwLevel": item.nsfw_level,
+            "usedCount": item.used_count,
+            "contributor": item.contributor,
+            "sourceUrl": item.source_url,
+            "filePath": item.file_path,
+            "createdAt": item.created_at,
+            "usedAt": item.used_at,
+        }
+
+    def web_upload_options(self) -> dict:
+        """页面上的「免审」「可见范围」两个开关，存在库里。
+
+        为什么不用请求参数：上传走的是桥接层的二进制通道（`bridge.upload`），
+        它只带文件、不带额外字段。所以页面在改动这两个开关时先写一条记录，
+        上传时再读回来。同一个人操作后台，不存在并发歧义。
+        """
+        scope = self.store.get_meta("web_upload_scope", "") or str(
+            self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP
+        )
+        skip = self.store.get_meta("web_upload_skip_review", "1")
+        return {"scope": scope, "skipReview": skip != "0"}
+
+    async def web_set_upload_options(self, *, scope: str = "", skip_review=None) -> dict:
+        if scope in (SCOPE_GROUP, SCOPE_GLOBAL):
+            self.store.set_meta("web_upload_scope", scope)
+        if skip_review is not None:
+            self.store.set_meta("web_upload_skip_review", "1" if skip_review else "0")
+        return {"ok": True, **self.web_upload_options()}
+
+    async def web_upload(
+        self,
+        data: bytes,
+        filename: str = "",
+        *,
+        scope: str = "",
+        skip_review=None,
+    ) -> dict:
+        """网页拖进来的图。
+
+        ``skip_review=True``（页面默认）时**不花审核的钱**：拖进来的人就是
+        坐在面板前的管理员，他看得到自己拖的是什么。想恢复「先审后收」，
+        把页面上的勾去掉即可，走的就是群友投稿那条完全一样的管线。
+        """
+        options = self.web_upload_options()
+        if not scope:
+            scope = options["scope"]
+        if skip_review is None:
+            skip_review = options["skipReview"]
+
+        if skip_review:
+            outcome = await self._ingest_without_review(data, scope=scope)
+        else:
+            outcome = await self.pipeline.ingest(
+                data,
+                origin="submitted",
+                contributor="web",
+                scope=scope or str(self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP),
+            )
+        result = {
+            "ok": bool(outcome.ok),
+            "message": outcome.reason or ("已入库" if outcome.ok else "没收"),
+            "skippedReview": bool(skip_review),
+            "duplicate": bool(outcome.duplicate),
+            "filename": filename,
+        }
+        if outcome.meme is not None:
+            result["meme"] = {
+                "id": outcome.meme.id,
+                "origin": outcome.meme.origin,
+                "scope": outcome.meme.scope,
+                "caption": outcome.meme.caption,
+            }
+        return result
+
+    async def _ingest_without_review(self, data: bytes, *, scope: str = ""):
+        """免审入库：仍然做格式/大小/查重，只是跳过模型审核。"""
+        from .meme.media import ext_for_mime, human_size, sha256_of, sniff_image
+        from .meme.models import STATUS_ACTIVE, IngestResult
+
+        if not data:
+            return IngestResult(ok=False, reason="空文件")
+        sniffed = sniff_image(data)
+        if sniffed is None:
+            return IngestResult(ok=False, reason="这不是图片（只收 jpg/png/gif/webp）")
+        mime, ext = sniffed
+        max_bytes = int(self._cfg_float("max_image_mb", 8.0) * 1024 * 1024)
+        if max_bytes and len(data) > max_bytes:
+            return IngestResult(
+                ok=False,
+                reason=f"图太大了（{human_size(len(data))}，上限 {human_size(max_bytes)}）",
+            )
+        sha256 = sha256_of(data)
+        existing = await asyncio.to_thread(self.store.by_sha, sha256)
+        if existing is not None and existing.status == STATUS_ACTIVE:
+            return IngestResult(ok=True, meme=existing, duplicate=True, reason="这张早就在库里了")
+        path = await asyncio.to_thread(self.store.save_media, sha256, data, ext)
+        meme_id, _created = await asyncio.to_thread(
+            self.store.add,
+            sha256=sha256,
+            file_path=path,
+            origin="submitted",
+            scope=scope or str(self.cfg.get("submission_scope", SCOPE_GROUP) or SCOPE_GROUP),
+            group_id="",
+            mime=mime,
+            caption="",
+            tags=("免审",),
+            contributor="web",
+        )
+        await asyncio.to_thread(self.store.clear_reject, sha256)
+        meme = await asyncio.to_thread(self.store.get, meme_id)
+        if meme is None:
+            return IngestResult(ok=False, reason="入库失败（数据库异常）")
+        return IngestResult(ok=True, meme=meme, reason="已免审入库")
+
+    async def web_delete(self, raw_id: str) -> dict:
+        try:
+            meme_id = int(str(raw_id).lstrip("#"))
+        except ValueError:
+            return {"ok": False, "message": "编号不对"}
+        item = await asyncio.to_thread(self.store.delete, meme_id)
+        if item is None:
+            return {"ok": False, "message": f"没有 #{meme_id} 这张"}
+        try:
+            if item.origin != "bundled" and os.path.isfile(item.file_path):
+                os.remove(item.file_path)
+        except OSError:
+            pass
+        return {"ok": True, "message": f"已下架 #{meme_id}", "id": meme_id}
+
+    async def web_toggle(self, raw_id: str, active: bool) -> dict:
+        try:
+            meme_id = int(str(raw_id).lstrip("#"))
+        except ValueError:
+            return {"ok": False, "message": "编号不对"}
+        status = "active" if active else "disabled"
+        changed = await asyncio.to_thread(self.store.set_status, meme_id, status)
+        if not changed:
+            return {"ok": False, "message": f"没有 #{meme_id} 这张"}
+        return {"ok": True, "id": meme_id, "status": status, "message": "已启用" if active else "已停用"}
+
+    async def web_recheck(self, raw_id: str) -> dict:
+        from .meme.review import judge
+
+        try:
+            meme_id = int(str(raw_id).lstrip("#"))
+        except ValueError:
+            return {"ok": False, "message": "编号不对"}
+        item = await asyncio.to_thread(self.store.get, meme_id)
+        if item is None:
+            return {"ok": False, "message": f"没有 #{meme_id} 这张"}
+        try:
+            data = await asyncio.to_thread(self._read_file, item.file_path)
+        except OSError as exc:
+            return {"ok": False, "message": f"读图失败：{exc}"}
+        review = await self.pipeline.review_bytes(data, item.mime)
+        accepted, why = judge(review, self.pipeline.policy)
+        if not accepted:
+            await asyncio.to_thread(self.store.set_status, meme_id, "disabled")
+        return {
+            "ok": True,
+            "id": meme_id,
+            "accepted": accepted,
+            "reason": why,
+            "nsfwLevel": review.nsfw_level,
+            "flags": list(review.flags),
+            "language": review.language,
+            "caption": review.caption_text,
+            "parsed": review.parsed,
+            "message": ("通过：" if accepted else "不通过（已自动停用）：") + why,
+        }
+
+    def web_settings(self) -> dict:
+        from .meme.gallery import ORIGIN_LABELS
+        from .meme.settings import export_settings
+
+        payload = export_settings(self.cfg)
+        payload["originLabels"] = ORIGIN_LABELS
+        payload["plugin"] = {"name": PLUGIN_NAME, "version": "0.2.0"}
+        return payload
+
+    async def web_save_settings(self, values: dict) -> dict:
+        """网页保存配置：写回插件配置对象 + 落盘 + 重建管线。"""
+        from .meme.settings import apply_settings
+
+        applied, errors = apply_settings(self.config, values)
+        if applied:
+            saver = getattr(self.config, "save_config_async", None)
+            if callable(saver):
+                try:
+                    await saver()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[Meme] 配置落盘失败：%s", exc)
+                    return {"ok": False, "message": f"配置已改但写盘失败：{exc}", "applied": applied}
+            self._pipeline = None  # 重建：阈值/模式都变了
+            await asyncio.to_thread(
+                self.store.set_meta, "settings_saved_at", str(int(time.time()))
+            )
+        if errors and not applied:
+            return {"ok": False, "message": "；".join(errors), "errors": errors}
+        return {
+            "ok": True,
+            "applied": applied,
+            "errors": errors,
+            "message": ("已保存 %d 项" % len(applied)) if applied else "没有改动",
+        }
