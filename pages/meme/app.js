@@ -32,6 +32,7 @@ const state = {
   limit: 24,
   offset: 0,
   cards: [],
+  hasMore: false,
   settings: null,
 };
 
@@ -89,11 +90,16 @@ async function loadState({ append = false } = {}) {
   });
 
   state.offset = payload.offset;
+  state.hasMore = Boolean(payload.hasMore);
   state.cards = append ? state.cards.concat(payload.cards) : payload.cards;
 
   el("statActive").textContent = payload.activeTotal;
   el("statTotal").textContent = payload.libraryTotal;
   el("statRejected").textContent = payload.rejected;
+  // 顶栏按钮上的数字：不点进去也知道有多少条等着人工过
+  if (el("rejectedCount")) {
+    el("rejectedCount").textContent = payload.rejected ? String(payload.rejected) : "";
+  }
   if (el("statAuto")) {
     const auto = payload.auto || {};
     const pcts = auto.pcts || {};
@@ -138,7 +144,15 @@ async function loadState({ append = false } = {}) {
   renderGrid();
   renderBans(payload.blacklist || []);
   renderCardInfo(payload.card || {});
-  el("loadMore").classList.toggle("hidden", !payload.hasMore);
+  syncLibraryMore();
+}
+
+/* 图库的「加载更多」什么时候该出现：有下一页 **且** 拒收页签没打开。
+ * 两处都会改这个按钮的可见性（加载图库、切页签），各算各的就会互相覆盖 ——
+ * 这个函数是唯一的答案。 */
+function syncLibraryMore() {
+  const open = el("rejected") ? !el("rejected").classList.contains("hidden") : false;
+  el("loadMore")?.classList.toggle("hidden", open || !state.hasMore);
 }
 
 function renderAuto(auto) {
@@ -722,6 +736,213 @@ function bind() {
   });
   on("saveSettings", "click", saveSettings);
   on("resetSettings", "click", () => loadSettings().catch(showError));
+
+  /* 拒收页签 */
+  on("toggleRejected", "click", () => {
+    const box = el("rejected");
+    if (!box) return;
+    const open = box.classList.toggle("hidden") === false;
+    const button = el("toggleRejected");
+    if (button) button.classList.toggle("on", open);
+    // 图库主体让位，免得两套网格上下堆在一起看着像重复渲染
+    el("grid")?.classList.toggle("hidden", open);
+    syncLibraryMore();
+    el("originChips")?.closest(".toolbar")?.classList.toggle("hidden", open);
+    if (open) {
+      box.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (!rejected.loaded) {
+        rejected.loaded = true;
+        loadRejected().catch(showError);
+      }
+    }
+  });
+
+  on("rejectedMore", "click", () => loadRejected({ append: true }).catch(showError));
+
+  el("rejectedGrid")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-act]");
+    const card = event.target.closest(".rejected-card");
+    if (!card) return;
+    const sha = card.dataset.sha;
+    const act = button?.dataset.act;
+    if (act === "accept") acceptRejected(sha).catch(showError);
+    else if (act === "drop") dropRejected(sha).catch(showError);
+    else if (act === "open") openRejectedDetail(sha).catch(showError);
+  });
+}
+
+/* ---------------- 拒收页 ----------------
+ *
+ * 审核模型判死的图，人工在这里过一遍。两条路：
+ *   接收 → 不再走 AI 审核，直接入库（用户要的就是「点一下就完事」）
+ *   丢弃 → 删记录 + 删图，以后这张还能重新投稿
+ *
+ * 注意 0.6.4 之前拒收的图**从来没写过盘**（判死当场就把字节丢了），
+ * 那些行只有 sha256 和原因，页面标一句「当时没存图」并且只给「丢弃」。
+ */
+const rejected = {
+  cards: [],
+  offset: 0,
+  limit: 24,
+  hasMore: false,
+  loaded: false,
+};
+
+function fmtSize(bytes) {
+  if (!bytes) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = Number(bytes);
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i += 1;
+  }
+  return i === 0 ? `${value}B` : `${value.toFixed(1)}${units[i]}`;
+}
+
+async function loadRejected({ append = false } = {}) {
+  const offset = append ? rejected.offset + rejected.limit : 0;
+  const payload = await apiGet("ui/rejected", { limit: rejected.limit, offset });
+  rejected.offset = payload.offset;
+  rejected.cards = append ? rejected.cards.concat(payload.cards) : payload.cards;
+  rejected.hasMore = Boolean(payload.hasMore);
+  renderRejected(payload.total);
+}
+
+function renderRejected(total) {
+  const grid = el("rejectedGrid");
+  const summary = el("rejectedSummary");
+  if (!grid) return;
+
+  const noFile = rejected.cards.filter((card) => !card.hasFile).length;
+  if (summary) {
+    const bits = [`共 ${total ?? rejected.cards.length} 条拒收`];
+    if (noFile) {
+      bits.push(
+        `其中 ${noFile} 条是 0.6.4 之前留下的，当时候没存图 —— 只能看原因，不能接收`
+      );
+    }
+    summary.textContent = bits.join(" · ");
+  }
+
+  if (!rejected.cards.length) {
+    grid.innerHTML =
+      '<div class="empty">还没有被拒收的图。<br />以后审核判死的图会自动出现在这里。</div>';
+    el("rejectedMore")?.classList.add("hidden");
+    return;
+  }
+
+  grid.innerHTML = rejected.cards
+    .map((card) => {
+      const thumb = card.thumb
+        ? `<img src="${card.thumb}" alt="" loading="lazy" />`
+        : '<div class="rejected-noimg">这张图<br />没存下来</div>';
+      const meta = [
+        card.sizeText ? `<span>${escapeHtml(card.sizeText)}</span>` : "",
+        card.origin ? `<span>${escapeHtml(card.origin)}</span>` : "",
+      ]
+        .filter(Boolean)
+        .join("");
+      return `
+      <article class="card rejected-card" data-sha="${escapeHtml(card.sha256)}">
+        <div class="card-thumb" data-act="open">
+          ${thumb}
+          <div class="badges"><span class="badge warn">被拒</span></div>
+        </div>
+        <div class="card-body">
+          <div class="card-caption">${escapeHtml(card.reason || "（没写原因）")}</div>
+          <div class="card-meta">
+            <span>${fmtTime(card.createdAt)}</span>
+            ${meta}
+          </div>
+          <div class="card-actions">
+            <button class="ghost" data-act="open">大图</button>
+            ${
+              card.hasFile
+                ? '<button data-act="accept">接收</button>'
+                : '<button class="ghost" disabled title="这张的图当时没存下来">接收</button>'
+            }
+            <button class="danger" data-act="drop">丢弃</button>
+          </div>
+        </div>
+      </article>`;
+    })
+    .join("");
+  el("rejectedMore")?.classList.toggle("hidden", !rejected.hasMore);
+}
+
+function closeModal() {
+  el("modal")?.classList.add("hidden");
+}
+
+async function openRejectedDetail(sha) {
+  const payload = await apiGet("ui/rejected_detail", { sha });
+  const info = [
+    `拒收原因：${payload.reason || "（没写）"}`,
+    `投稿人：${payload.contributor || "—"}`,
+    `拒收时间：${fmtTime(payload.createdAt)}`,
+    payload.size ? `大小：${fmtSize(payload.size)}（${payload.mime || "?"}）` : "",
+    payload.origin ? `来源：${payload.origin}` : "",
+    payload.sourceUrl ? `原链接：${payload.sourceUrl}` : "",
+    payload.hasFile ? "" : "⚠ 这张图当时没存下来（0.6.4 之前的拒收不存图），没法接收",
+    payload.alreadyInLibrary ? "ℹ 库里已经有同一张了" : "",
+  ]
+    .filter(Boolean)
+    .join("<br />");
+
+  el("modalImage").src = payload.image || "";
+  el("modalImage").style.display = payload.image ? "" : "none";
+  el("modalInfo").innerHTML = info;
+
+  const actions = el("modalActions");
+  actions.innerHTML = "";
+  if (payload.hasFile) {
+    const accept = document.createElement("button");
+    accept.textContent = "接收（直接入库）";
+    accept.addEventListener("click", () => {
+      closeModal();
+      acceptRejected(payload.sha256).catch(showError);
+    });
+    actions.appendChild(accept);
+  }
+  const drop = document.createElement("button");
+  drop.className = "danger";
+  drop.textContent = "丢弃";
+  drop.addEventListener("click", () => {
+    closeModal();
+    dropRejected(payload.sha256).catch(showError);
+  });
+  actions.appendChild(drop);
+
+  el("modal").classList.remove("hidden");
+}
+
+async function acceptRejected(sha) {
+  if (
+    !(await ask("接收后会直接进图库开始发（不再走 AI 审核）。确定？", {
+      okText: "接收",
+    }))
+  ) {
+    return;
+  }
+  const result = await apiPost("ui/rejected_accept", { sha });
+  logUpload(result.message || "已入库");
+  await loadRejected();
+  await loadState();
+}
+
+async function dropRejected(sha) {
+  if (
+    !(await ask("丢弃会删掉这条记录和那张图，以后这张还能重新投稿。确定？", {
+      okText: "丢弃",
+    }))
+  ) {
+    return;
+  }
+  const result = await apiPost("ui/rejected_drop", { sha });
+  logUpload(result.message || "已丢弃");
+  await loadRejected();
+  await loadState();
 }
 
 function showError(error) {

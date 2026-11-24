@@ -136,6 +136,10 @@ class MemeWebUI:
             ("config", self.config_router, ["GET", "POST"], "读取/保存可调参数"),
             ("card_probe", self.card_probe, ["POST"], "自检：卡片图能不能进 QQ 素材库"),
             ("unban", self.unban, ["POST"], "恢复某人的投稿权限"),
+            ("rejected", self.rejected, ["GET"], "被拒收的图（列表）"),
+            ("rejected_detail", self.rejected_detail, ["GET"], "一张被拒收的图（大图）"),
+            ("rejected_accept", self.rejected_accept, ["POST"], "人工接收：直接入库"),
+            ("rejected_drop", self.rejected_drop, ["POST"], "丢弃这条拒收记录"),
         ]
         for name, handler, methods, desc in table:
             route = f"{ROUTE_PREFIX}/{name}"
@@ -279,6 +283,42 @@ class MemeWebUI:
             logger.warning("[Meme] 卡片图自检失败", exc_info=True)
             return _error(f"自检失败：{type(exc).__name__}: {exc}")
         return _ok(result)
+
+    async def rejected(self) -> Any:
+        args = await _read_query()
+        try:
+            payload = await self.plugin.web_rejected(
+                limit=int(args.get("limit") or 24),
+                offset=int(args.get("offset") or 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Meme] 读取拒收列表失败", exc_info=True)
+            return _error(f"读取拒收列表失败：{type(exc).__name__}: {exc}")
+        return _ok(payload)
+
+    async def rejected_detail(self) -> Any:
+        args = await _read_query()
+        try:
+            payload = await self.plugin.web_rejected_detail(str(args.get("sha") or ""))
+        except Exception as exc:  # noqa: BLE001
+            return _error(f"读取失败：{exc}")
+        if payload is None:
+            return _error("没有这张图")
+        return _ok(payload)
+
+    async def rejected_accept(self) -> Any:
+        payload = await _read_json()
+        result = await self.plugin.web_rejected_accept(str(payload.get("sha") or ""))
+        if result.get("ok"):
+            return _ok(result)
+        return _error(str(result.get("message") or "入库失败"), extra=result)
+
+    async def rejected_drop(self) -> Any:
+        payload = await _read_json()
+        result = await self.plugin.web_rejected_drop(str(payload.get("sha") or ""))
+        if result.get("ok"):
+            return _ok(result)
+        return _error(str(result.get("message") or "丢弃失败"))
 
     async def config_router(self) -> Any:
         if await _current_method() == "POST":

@@ -21,6 +21,7 @@ from .models import (
     MemeItem,
     Review,
 )
+from .media import ext_for_mime
 from .select import pick_meme
 
 _SCHEMA = """
@@ -60,6 +61,7 @@ CREATE TABLE IF NOT EXISTS rejects (
     contributor TEXT NOT NULL DEFAULT '',
     created_at  REAL NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_rejects_created ON rejects(created_at);
 
 CREATE TABLE IF NOT EXISTS groups (
     umo           TEXT PRIMARY KEY,
@@ -92,6 +94,25 @@ CREATE TABLE IF NOT EXISTS meta (
     k TEXT PRIMARY KEY,
     v TEXT NOT NULL DEFAULT ''
 );
+
+-- 投递记录：哪个会话、什么时候、把哪张图发出去过。
+--
+-- 为什么要有这张表：memes 表里只有一个全局的 used_at/used_count，那是「全站
+-- 发过几次」的热度，不是「这个群看过没有」。只靠全局字段时，五个群共用一条
+-- 队列 —— 新图被第一个抽中的群吃掉，其余群要等整整一轮（实测 14~29 天）才
+-- 见得到，体感就是「一百多张候选，老群还是那几张熟的」。
+--
+-- 主键 (umo, meme_id)：一个群对一张图只记一行（只关心「发过没」和「多早发的」，
+-- 发过几次不影响挑选 —— 挑选只按最早那次算冷热）。
+CREATE TABLE IF NOT EXISTS deliveries (
+    umo       TEXT NOT NULL,
+    meme_id   INTEGER NOT NULL,
+    first_at  REAL NOT NULL DEFAULT 0,
+    last_at   REAL NOT NULL DEFAULT 0,
+    times     INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (umo, meme_id)
+);
+CREATE INDEX IF NOT EXISTS idx_deliveries_meme ON deliveries(meme_id);
 
 -- 恶意投稿黑名单：按「人」拉黑，跨群生效。reason/evidence 都留着，事后能复盘。
 CREATE TABLE IF NOT EXISTS blacklist (
@@ -154,6 +175,17 @@ class MemeStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_card_materials_sha ON card_materials(sha256)"
             )
+            # 老库补列：后台「拒收」页面（0.6.4 加的）。没有这些列也能跑，
+            # 只是页面上的「来源 / 大小 / 格式」是空的。
+            reject_columns = {row["name"] for row in conn.execute("PRAGMA table_info(rejects)")}
+            for name, ddl in (
+                ("origin", "TEXT NOT NULL DEFAULT ''"),
+                ("source_url", "TEXT NOT NULL DEFAULT ''"),
+                ("mime", "TEXT NOT NULL DEFAULT ''"),
+                ("size", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in reject_columns:
+                    conn.execute(f"ALTER TABLE rejects ADD COLUMN {name} {ddl}")
             # 老库补列：每小时自动推（0.5.0 加的）
             group_columns = {row["name"] for row in conn.execute("PRAGMA table_info(groups)")}
             for name, ddl in (
@@ -282,20 +314,65 @@ class MemeStore:
         self._write(f"UPDATE memes SET {', '.join(sets)} WHERE id = ?", params)
 
     def random_pool(self) -> list[MemeItem]:
-        """能发的所有图。图库只有一份，所有群看到的是同一批。"""
+        """能发的所有图。图库只有一份，所有群看到的是同一批 ——
+        但「谁发过」是按群算的，见 ``deliveries`` 表和 ``seen_by``。"""
         rows = self._rows(
             "SELECT * FROM memes WHERE status = 'active'"
         )
         return [MemeItem.from_row(row) for row in rows]
 
-    def pick(self, weights: dict, rng=None) -> MemeItem | None:
-        return pick_meme(self.random_pool(), weights, rng)
+    def seen_by(self, umo: str) -> dict[int, float]:
+        """这个会话发过哪几张、各自**最后一次**是啥时候：``{meme_id: last_at}``。
 
-    def mark_used(self, meme_id: int) -> None:
-        self._write(
-            "UPDATE memes SET used_at = ?, used_count = used_count + 1 WHERE id = ?",
-            (self.now(), int(meme_id)),
+        用 ``last_at`` 而不是 ``first_at``：``first_at`` 一旦写下就再也不变，
+        拿它判断冷热的话，池子发遍之后永远是同一张「最早那回发的」被选中 ——
+        实测一条 222 次的推送里同一张图被推了 121 次。``first_at`` 仍然保留，
+        它的用途是「这个群第一次看到它是什么时候」。
+
+        ``umo`` 为空表示「没有会话上下文」，返回空 dict（等同于谁都没发过）。
+        """
+        if not umo:
+            return {}
+        rows = self._rows(
+            "SELECT meme_id, last_at FROM deliveries WHERE umo = ?", (str(umo),)
         )
+        return {int(row["meme_id"]): float(row["last_at"] or 0) for row in rows}
+
+    def pick(self, weights: dict, rng=None, umo: str = "") -> MemeItem | None:
+        """给一个会话挑一张。传了 ``umo`` 就按本群自己的投递记录去重。"""
+        return pick_meme(
+            self.random_pool(),
+            weights,
+            rng,
+            seen=self.seen_by(umo) if umo else None,
+        )
+
+    def mark_used(self, meme_id: int, umo: str = "") -> None:
+        """记账。
+
+        两本账分开记，不能混：
+          * ``memes.used_at/used_count`` = **全站**热度（页面统计、卡片上的
+            「发过 N 次」都读它）。跨群共享，用来让同一张图别在五个群同时刷屏。
+          * ``deliveries`` = **本群**发过没有。挑选只认这本，新图才能保证在
+            每个群都先露面一次。
+
+        ``umo`` 为空时只记全局账（没有会话上下文的老调用点）。
+        """
+        now = self.now()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE memes SET used_at = ?, used_count = used_count + 1 WHERE id = ?",
+                (now, int(meme_id)),
+            )
+            if umo:
+                conn.execute(
+                    """INSERT INTO deliveries (umo, meme_id, first_at, last_at, times)
+                       VALUES (?,?,?,?,1)
+                       ON CONFLICT(umo, meme_id) DO UPDATE SET
+                           last_at = excluded.last_at,
+                           times = deliveries.times + 1""",
+                    (str(umo), int(meme_id), now, now),
+                )
 
     def recent(self, limit: int = 10) -> list[MemeItem]:
         rows = self._rows(
@@ -339,13 +416,35 @@ class MemeStore:
 
     # --- 拒收记录 ---------------------------------------------------------
 
-    def reject(self, sha256: str, reason: str, contributor: str = "") -> None:
+    def reject(
+        self,
+        sha256: str,
+        reason: str,
+        contributor: str = "",
+        *,
+        origin: str = "",
+        source_url: str = "",
+        mime: str = "",
+        size: int = 0,
+    ) -> None:
+        """记一条拒收。
+
+        ``origin`` / ``source_url`` / ``mime`` / ``size`` 是 0.6.4 加的：后台的
+        「拒收」页面要靠它们区分「哪个群投的、多大、什么格式」，也方便判断
+        一条老记录为什么没有图（0.6.4 之前拒收的图不入盘，只有 sha256）。
+        """
         self._write(
-            """INSERT INTO rejects (sha256, reason, contributor, created_at)
-               VALUES (?,?,?,?)
+            """INSERT INTO rejects
+                   (sha256, reason, contributor, created_at, origin, source_url, mime, size)
+               VALUES (?,?,?,?,?,?,?,?)
                ON CONFLICT(sha256) DO UPDATE SET reason = excluded.reason,
-                                                 created_at = excluded.created_at""",
-            (sha256, reason, contributor, self.now()),
+                                                 created_at = excluded.created_at,
+                                                 origin = excluded.origin,
+                                                 source_url = excluded.source_url,
+                                                 mime = excluded.mime,
+                                                 size = excluded.size""",
+            (sha256, reason, contributor, self.now(),
+             str(origin or ""), str(source_url or ""), str(mime or ""), int(size or 0)),
         )
 
     def rejection_reason(self, sha256: str) -> str | None:
@@ -357,6 +456,71 @@ class MemeStore:
 
     def rejected_count(self) -> int:
         return int(self._rows("SELECT COUNT(*) AS n FROM rejects")[0]["n"])
+
+    def rejected_page(self, limit: int = 24, offset: int = 0) -> list[dict]:
+        """拒收列表，最新的在前。``has_file`` 表示这张的图还在不在盘上。
+
+        0.6.4 之前拒收的图**从来没写进磁盘**（审核判死当场就丢了字节），
+        所以那些行 ``has_file`` 恒为 False，页面据此显示「当时没存图」。
+        """
+        rows = self._rows(
+            "SELECT * FROM rejects ORDER BY created_at DESC, sha256 LIMIT ? OFFSET ?",
+            (int(limit), int(offset)),
+        )
+        return [self._reject_row(row) for row in rows]
+
+    def _reject_row(self, row) -> dict:
+        data = dict(row)
+        sha = str(data.get("sha256") or "")
+        path = self.rejected_media_path(sha, ext_for_mime(str(data.get("mime") or ""))) if sha else ""
+        data["has_file"] = bool(path) and os.path.isfile(path)
+        data["file_path"] = path if data["has_file"] else ""
+        return data
+
+    def rejected_media_path(self, sha256: str, ext: str = ".jpg") -> str:
+        """拒收图的落盘路径：``media/rejected/ab/<sha>.<ext>``。
+
+        和正式库的 ``media/ab/`` 分开放，是怕 `clean` 之类的清理逻辑把
+        正式图当垃圾扫走，也怕人工翻目录时把没审核过的图当成库里的图。
+        """
+        bucket = os.path.join(self.media_dir, "rejected", sha256[:2] or "00")
+        return os.path.join(bucket, sha256 + (ext or ".jpg"))
+
+    def save_rejected(self, sha256: str, data: bytes, ext: str = ".jpg") -> str:
+        """把被拒的图存下来（后台「拒收」页面要能看图判断）。
+
+        存盘失败不算业务失败：拒收记录本身比那张图重要，调用方拿到空字符串
+        照常往下走，页面只会显示「图没存下来」。
+        """
+        path = self.rejected_media_path(sha256, ext)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".part"
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            os.replace(tmp, path)
+        except OSError:
+            return ""
+        return path
+
+    def rejected_bytes(self, sha256: str, mime: str = "") -> bytes | None:
+        """读回一张拒收图的原始字节（「接收」时要入库）。"""
+        path = self.rejected_media_path(sha256, ext_for_mime(mime))
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    def drop_rejected_file(self, sha256: str, mime: str = "") -> None:
+        path = self.rejected_media_path(sha256, ext_for_mime(mime))
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
 
     # --- 群推送状态 -------------------------------------------------------
 
@@ -377,6 +541,62 @@ class MemeStore:
                        last_seen = excluded.last_seen""",
                 (umo, group_id or "", self.now()),
             )
+
+    #: 回填时最多认几个群当「发过」。群太多的话回填量会炸，而且那种规模的库
+    #: 本来也不需要回填（第一次发就按群记账了）。
+    BACKFILL_GROUP_LIMIT = 12
+
+    def backfill_deliveries(self, umo: str, only_if_empty: bool = True) -> int:
+        """把**全局**记账回填成**本群**记账，返回写入的行数。
+
+        干什么用：``deliveries`` 是 0.6.3 才加的表，之前所有发送只记了全局
+        ``used_at``。如果不管，升级后每个群的 ``seen_by`` 都是空的 —— 于是
+        「本群没发过的优先」会把手里那 100 多张图**每个群从头重发一遍**，用户
+        看到的就是一晚上全是熟图，比不改还糟。
+
+        所以升级时按「这个群最近发出去过什么」猜一次：取 ``groups.auto_level``
+        非空的群（真在自动推的），把全局发过的每一张都记到它头上，时间用
+        ``memes.used_at``（全局最久没发的那批，回填后也是本群最久没发的，
+        冷热顺序和升级前一致）。没发过的图（``used_at = 0``）不记 —— 那些
+        本来就是「谁都没见过」，每个群都该优先发。
+
+        ``only_if_empty=True`` 时，这个群已经有记录就什么都不做（重复升级安全）。
+        """
+        if not umo:
+            return 0
+        with self._lock, self._connect() as conn:
+            if only_if_empty:
+                have = conn.execute(
+                    "SELECT 1 FROM deliveries WHERE umo = ? LIMIT 1", (str(umo),)
+                ).fetchone()
+                if have:
+                    return 0
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO deliveries
+                       (umo, meme_id, first_at, last_at, times)
+                   SELECT ?, id, used_at, used_at, used_count
+                   FROM memes
+                   WHERE status = 'active' AND used_count > 0 AND used_at > 0""",
+                (str(umo),),
+            )
+            return int(cur.rowcount or 0)
+
+    def backfill_all_groups(self) -> dict[str, int]:
+        """给所有「真在自动推」的群各回填一次。返回 ``{umo: 写了几行}``。"""
+        rows = self._rows(
+            "SELECT umo FROM groups WHERE umo != '' AND auto_level != '' "
+            "ORDER BY last_seen DESC LIMIT ?",
+            (int(self.BACKFILL_GROUP_LIMIT),),
+        )
+        done: dict[str, int] = {}
+        for row in rows:
+            umo = str(row["umo"] or "")
+            if not umo:
+                continue
+            n = self.backfill_deliveries(umo)
+            if n:
+                done[umo] = n
+        return done
 
     def recent_group_umos(self, limit: int = 5) -> list[str]:
         """最近说过话的群（有 umo 的那些）。卡片自检需要一个真群来拿 client。"""

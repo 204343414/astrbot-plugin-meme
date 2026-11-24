@@ -64,3 +64,42 @@ def test_schema_descriptions_still_explain_something():
             continue
         desc = str(item.get("description", "") or "").strip()
         assert len(desc) >= 8, f"{key} 的说明太短了：{desc!r}"
+
+
+# --- 拒收页签（0.6.4）------------------------------------------------------
+
+def test_rejected_tab_exists_and_is_wired():
+    """顶栏要有「拒收」入口，HTML 的 id 和 JS 绑定的 id 必须对上。
+
+    踩过的坑：HTML 里删了一个元素、JS 还在 `el("xxx").addEventListener`，
+    抛 TypeError 之后**后面所有按钮全挂不上**。所以这对 id 用测试钉住。
+    """
+    assert 'id="toggleRejected"' in HTML
+    assert 'id="rejectedCount"' in HTML
+    assert 'on("toggleRejected", "click"' in JS
+    assert "ui/rejected" in JS
+    assert "ui/rejected_accept" in JS
+    assert "ui/rejected_drop" in JS
+    assert "ui/rejected_detail" in JS
+
+
+def test_rejected_actions_use_in_page_confirm():
+    """接收/丢弃都要走页面内的确认框，不能指望 window.confirm。"""
+    for action in ("acceptRejected", "dropRejected"):
+        start = JS.index(f"async function {action}")
+        body = JS[start : start + 700]
+        assert "await ask(" in body, f"{action} 没有二次确认"
+
+
+def test_rejected_list_is_hidden_by_default():
+    """默认不展开：拒收是低频操作，不该占着首屏。"""
+    assert re.search(r'id="rejected"[^>]*class="rejected hidden"', HTML)
+    assert 'id="rejectedGrid"' in HTML
+    assert 'id="rejectedMore"' in HTML
+
+
+def test_rejected_page_flags_missing_files():
+    """0.6.4 之前拒收的图没存盘，页面必须明确说「没存下来」而不是空着。"""
+    assert "rejected-noimg" in JS
+    assert "没存下来" in JS
+    assert "hasFile" in JS

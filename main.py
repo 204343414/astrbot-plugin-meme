@@ -206,6 +206,7 @@ class MemePlugin(Star):
 
     async def initialize(self) -> None:
         self.store.init()
+        await self._backfill_deliveries()
         self._ensure_scheduler()
         self._reschedule_auto()
         await self._bootstrap_auto()
@@ -504,16 +505,17 @@ class MemePlugin(Star):
         if wait > 0:
             # ACK 4 = 无权限：群里会看到一句「暂时不能点」的提示，而不是按钮没反应
             return 4
-        item = await asyncio.to_thread(self.pipeline.pick, self._weights())
+        item = await asyncio.to_thread(self.pipeline.pick, self._weights(), None, origin)
         if item is None:
             return 3
         self._touch_cooldowns(origin, sender)
-        await asyncio.to_thread(self.store.mark_used, item.id)
         try:
             await self._send_item_by_origin(origin, item, context=context)
         except Exception:  # noqa: BLE001
             logger.warning("[Meme] 按钮「再来一张」发送失败", exc_info=True)
             return 1
+        # 发成功才记账：失败的这张不该被算成「这个群已经看过了」。
+        await asyncio.to_thread(self.store.mark_used, item.id, origin)
         return 0
 
     async def _act_howto(self, context, params) -> int:
@@ -855,7 +857,10 @@ class MemePlugin(Star):
         "权限不足",
         "无主动消息权限",
     )
-    #: 「这个群已经不在了」——机器人被踢 / 群解散。同样关订阅。
+    #: 「这个群已经不在了」——机器人被踢 / 群解散 / 私聊对象已注销。同样关订阅。
+    #: ``用户/群已注销`` 是 QQ 官方对「这个会话已经没了」的标准措辞：实测一个
+    #: 已注销的私聊会话每天都被抽中、每次都失败，一周白吃 19 张图的配额，
+    #: 而这些图还被记成「已发过」踹到队尾。认出来就把订阅关掉。
     GROUP_GONE_MARKERS = (
         "不在群",
         "群不存在",
@@ -863,6 +868,9 @@ class MemePlugin(Star):
         "群已解散",
         "已解散",
         "机器人未加入",
+        "用户/群已注销",
+        "群已注销",
+        "用户已注销",
         "not in group",
         "invalid group",
         "group not found",
@@ -886,11 +894,10 @@ class MemePlugin(Star):
 
     async def _auto_push_one(self, umo: str, *, day_key: str) -> None:
         """真的给一个群自动发一条（复用 /meme 的整套发送链路）。"""
-        item = await asyncio.to_thread(self.pipeline.pick, self._weights())
+        item = await asyncio.to_thread(self.pipeline.pick, self._weights(), None, umo)
         if item is None:
             logger.info("[Meme] %s 自动推送跳过：库里没图", umo)
             return
-        await asyncio.to_thread(self.store.mark_used, item.id)
         try:
             await self._send_item_by_origin(umo, item, auto=True)
         except Exception as exc:  # noqa: BLE001
@@ -917,8 +924,34 @@ class MemePlugin(Star):
                     "机器人不在这个群了" if reason == "gone" else "群没开「机器人主动发言」",
                 )
             return
+        # 记账必须在**真的发出去之后**。原来写在发送之前 —— 一旦发送失败
+        # （私聊会话已注销、图床配额用尽），这张图照样被标成「刚发过」，
+        # used_at 被推到当前时刻踹到队尾，而群里根本没人看见。实测一周里
+        # 有 19 次这种「记了账但没发图」。
+        await asyncio.to_thread(self.store.mark_used, item.id, umo)
         count = await asyncio.to_thread(self.store.note_auto_push, umo, day_key=day_key)
         logger.info("[Meme] %s 自动推送 #%s（今天第 %s 条）", umo, item.id, count)
+
+    async def _backfill_deliveries(self) -> dict[str, int]:
+        """升级到「按群去重」时，把全局记账回填成本群记账（只做一次）。
+
+        不回填会怎样：``deliveries`` 是新表，升级后每个群都「一张没发过」，
+        于是「本群没发过的优先」会把手里 100 多张图**每个群从头重发一遍** ——
+        用户看到的是一晚上全是熟图，比不改还糟。回填按全局 ``used_at`` 认账，
+        冷热顺序和升级前一致，只是把「谁看过」落到每个群自己头上。
+        """
+        try:
+            done = await asyncio.to_thread(self.store.backfill_all_groups)
+        except Exception:  # noqa: BLE001
+            logger.warning("[Meme] 回填按群投递记录失败", exc_info=True)
+            return {}
+        if done:
+            logger.info(
+                "[Meme] 已把全局发送记录回填成按群记录：%s 个群，%s 行",
+                len(done),
+                sum(done.values()),
+            )
+        return done
 
     async def _bootstrap_auto(self, *, force: bool = False) -> list[str]:
         """批量给「还没订阅过」的群先开一个低档（用户要的「先悄悄试一遍」）。
@@ -1226,7 +1259,7 @@ class MemePlugin(Star):
         if group_wait > 0:
             return event.plain_result(f"这个群刚发过，{group_wait:.0f} 秒后再点")
 
-        item = await asyncio.to_thread(self.pipeline.pick, self._weights())
+        item = await asyncio.to_thread(self.pipeline.pick, self._weights(), None, umo)
         if item is None and self._api_configured():
             item = await self._fetch_api_meme()
         if item is None:
@@ -1236,8 +1269,10 @@ class MemePlugin(Star):
             )
 
         self._touch_cooldowns(umo, sender)
-        await asyncio.to_thread(self.store.mark_used, item.id)
-        return await self._send_item(event, item)
+        result = await self._send_item(event, item)
+        # 发成功才记账（见 _auto_push_one 里的说明）。
+        await asyncio.to_thread(self.store.mark_used, item.id, umo)
+        return result
 
     async def _send_item(self, event: AstrMessageEvent, item: MemeItem):
         return await self._send_item_by_origin(event.unified_msg_origin, item, event=event)
@@ -2343,6 +2378,177 @@ class MemePlugin(Star):
             "parsed": review.parsed,
             "message": ("通过：" if accepted else "不通过（已自动停用）：") + why,
         }
+
+    # --- 拒收页面（0.6.4）--------------------------------------------------
+
+    def _rejected_thumb(self, row: dict) -> str:
+        """拒收图的缩略图（data URL）。图没了就返回空串，页面显示占位。"""
+        from .meme.thumbs import GALLERY_THUMB, data_url, read_thumb
+
+        path = str(row.get("file_path") or "")
+        if not path or not os.path.isfile(path):
+            return ""
+        try:
+            raw = read_thumb(path, str(row.get("sha256") or ""), self._thumbs_dir(), GALLERY_THUMB)
+        except (OSError, MemoryError):
+            return ""
+        return data_url(raw)
+
+    async def web_rejected(self, *, limit: int = 24, offset: int = 0) -> dict:
+        """「拒收」页签的一页数据。
+
+        只给摘要不给原图：一页 24 张大图会把接口响应撑到几十 MB，页面在
+        面板的 iframe 里会很卡。看大图走 ``web_rejected_detail``。
+        """
+        from .meme.media import human_size
+
+        limit = max(1, min(int(limit or 24), 60))
+        offset = max(0, int(offset or 0))
+        rows = await asyncio.to_thread(self.store.rejected_page, limit + 1, offset)
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        total = await asyncio.to_thread(self.store.rejected_count)
+        cards = []
+        for row in rows:
+            cards.append({
+                "sha256": str(row.get("sha256") or ""),
+                "reason": str(row.get("reason") or ""),
+                "contributor": str(row.get("contributor") or ""),
+                "createdAt": float(row.get("created_at") or 0),
+                "origin": str(row.get("origin") or ""),
+                "sourceUrl": str(row.get("source_url") or ""),
+                "mime": str(row.get("mime") or ""),
+                "size": int(row.get("size") or 0),
+                "sizeText": human_size(int(row.get("size") or 0)) if row.get("size") else "",
+                "hasFile": bool(row.get("has_file")),
+                "thumb": self._rejected_thumb(row),
+            })
+        return {
+            "cards": cards,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "hasMore": has_more,
+            "noFileCount": sum(1 for c in cards if not c["hasFile"]),
+        }
+
+    async def web_rejected_detail(self, sha256: str) -> dict | None:
+        """一张拒收图的大图（原始字节转 data URL）+ 全部元信息。"""
+        from .meme.media import to_data_url
+
+        sha = str(sha256 or "").strip().lower()
+        if not sha:
+            return None
+        rows = await asyncio.to_thread(
+            self.store._rows, "SELECT * FROM rejects WHERE sha256 = ?", (sha,)
+        )
+        if not rows:
+            return None
+        row = await asyncio.to_thread(self.store._reject_row, rows[0])
+        data = await asyncio.to_thread(
+            self.store.rejected_bytes, sha, str(row.get("mime") or "")
+        )
+        image = ""
+        if data:
+            mime = str(row.get("mime") or "") or "image/jpeg"
+            image = to_data_url(data, mime)
+        return {
+            "sha256": sha,
+            "reason": str(row.get("reason") or ""),
+            "contributor": str(row.get("contributor") or ""),
+            "createdAt": float(row.get("created_at") or 0),
+            "origin": str(row.get("origin") or ""),
+            "sourceUrl": str(row.get("source_url") or ""),
+            "mime": str(row.get("mime") or ""),
+            "size": int(row.get("size") or 0),
+            "hasFile": bool(row.get("has_file")),
+            "image": image,
+            # 这张图入库之后会不会跟已有的撞车，页面上先提示一句
+            "alreadyInLibrary": bool(await asyncio.to_thread(self.store.by_sha, sha)),
+        }
+
+    async def web_rejected_accept(self, sha256: str) -> dict:
+        """人工判定「这张其实能收」：**不再走 AI 审核**，直接入库。
+
+        用户的要求是「点接收就完事」——这是人肉审核，比模型更可信，也不需要
+        再花一次调用。所以这里只做三件机械的事：读回字节、存进正式库、
+        清掉拒收记录（不清的话同一张再投稿会被 :meth:`rejection_reason` 直接拒）。
+        """
+        from .meme.media import sha256_of, sniff_image
+
+        sha = str(sha256 or "").strip().lower()
+        if not sha:
+            return {"ok": False, "message": "参数不对"}
+        rows = await asyncio.to_thread(
+            self.store._rows, "SELECT * FROM rejects WHERE sha256 = ?", (sha,)
+        )
+        if not rows:
+            return {"ok": False, "message": "没有这条拒收记录（可能已经被处理过）"}
+        row = dict(rows[0])
+        existing = await asyncio.to_thread(self.store.by_sha, sha)
+        if existing is not None:
+            # 库里已经有同一张：只清记录，不重复入库（sha256 是唯一键）
+            await asyncio.to_thread(self.store.clear_reject, sha)
+            return {
+                "ok": True,
+                "id": existing.id,
+                "alreadyThere": True,
+                "message": f"库里已经有这张了（#{existing.id}），已清掉拒收记录",
+            }
+
+        data = await asyncio.to_thread(
+            self.store.rejected_bytes, sha, str(row.get("mime") or "")
+        )
+        if not data:
+            return {
+                "ok": False,
+                "message": "这张的图当时没存下来（0.6.4 之前的拒收不存图），没法捞回来",
+            }
+        sniffed = sniff_image(data)
+        if sniffed is None:
+            return {"ok": False, "message": "文件已经损坏或不是图片，不能入库"}
+        mime, ext = sniffed
+        if sha256_of(data) != sha:
+            # 盘上的文件被改过：不能拿旧 sha 入库，否则以后去重全乱
+            return {"ok": False, "message": "文件内容对不上指纹（被动过？），为安全起见不入库"}
+
+        path = await asyncio.to_thread(self.store.save_media, sha, data, ext)
+        meme_id, created = await asyncio.to_thread(
+            lambda: self.store.add(
+                sha256=sha,
+                file_path=path,
+                origin=str(row.get("origin") or "") or "submitted",
+                mime=mime,
+                contributor=str(row.get("contributor") or ""),
+                source_url=str(row.get("source_url") or ""),
+                # 没走审核，NSFW 等级未知；标 0 是按「人工已看过」处理
+                nsfw_level=0,
+            )
+        )
+        await asyncio.to_thread(self.store.clear_reject, sha)
+        await asyncio.to_thread(self.store.drop_rejected_file, sha, mime)
+        logger.info("[Meme] 后台人工接收了一张被拒的图：%s -> #%s", sha[:12], meme_id)
+        return {
+            "ok": True,
+            "id": meme_id,
+            "created": bool(created),
+            "message": f"已入库 #{meme_id}" + ("（原本就在库里，只清了拒收记录）" if not created else ""),
+        }
+
+    async def web_rejected_drop(self, sha256: str) -> dict:
+        """人工判定「确实不该收」：删掉记录和那张图，同一张以后可以重新投稿。"""
+        sha = str(sha256 or "").strip().lower()
+        if not sha:
+            return {"ok": False, "message": "参数不对"}
+        rows = await asyncio.to_thread(
+            self.store._rows, "SELECT mime FROM rejects WHERE sha256 = ?", (sha,)
+        )
+        if not rows:
+            return {"ok": False, "message": "没有这条拒收记录"}
+        mime = str(dict(rows[0]).get("mime") or "")
+        await asyncio.to_thread(self.store.clear_reject, sha)
+        await asyncio.to_thread(self.store.drop_rejected_file, sha, mime)
+        return {"ok": True, "message": "已丢弃；这张图以后可以重新投稿"}
 
     def web_settings(self) -> dict:
         from .meme.gallery import ORIGIN_LABELS

@@ -131,7 +131,13 @@ class MemePipeline:
         # 也可能只判恶意（罕见）。两个结论都往上带，由命令层决定要不要执行。
         ban = bool(getattr(review, "ban_submitter", False))
         if not accepted:
-            self.store.reject(sha256, why, contributor)
+            # 先落盘再记账：后台「拒收」页面要看图判断要不要人工捞回来。
+            # 存盘失败不影响拒收本身（reject 记录才是必须的）。
+            self.store.save_rejected(sha256, data, ext)
+            self.store.reject(
+                sha256, why, contributor,
+                origin=origin, source_url=source_url, mime=mime, size=len(data),
+            )
             return IngestResult(
                 ok=False, reason=why, review=review,
                 banned=ban, ban_reason=getattr(review, "ban_reason", "") or why,
@@ -222,5 +228,6 @@ class MemePipeline:
 
     # --- 选图 -------------------------------------------------------------
 
-    def pick(self, weights: dict, rng=None) -> MemeItem | None:
-        return self.store.pick(weights, rng)
+    def pick(self, weights: dict, rng=None, umo: str = "") -> MemeItem | None:
+        """给一个会话挑一张。``umo`` 决定「本群没发过的优先」按谁的账算。"""
+        return self.store.pick(weights, rng, umo=umo)

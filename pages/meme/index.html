@@ -15,6 +15,7 @@
       </div>
       <div class="topbar-actions">
         <button id="refresh" class="ghost">刷新</button>
+        <button id="toggleRejected" class="ghost">拒收 <b id="rejectedCount"></b></button>
         <button id="toggleSettings" class="ghost">调参</button>
         <button id="toggleBans" class="ghost">禁止投稿</button>
       </div>
@@ -105,6 +106,22 @@
         <span id="probeMsg" class="msg" aria-live="polite"></span>
       </div>
       <p id="cardInfo" class="msg"></p>
+    </section>
+
+    <!-- 拒收页：审核判死的图在这里人工过一遍，点「接收」直接入库 -->
+    <section id="rejected" class="rejected hidden" aria-label="拒收的图">
+      <div class="settings-head">
+        <h2>被拒收的图</h2>
+        <p>
+          审核模型判死的图都在这里。点「接收」就<b>直接进图库开始发</b>（不再走审核）；
+          点「丢弃」连记录一起删掉，以后这张还能重新投稿。
+        </p>
+      </div>
+      <p id="rejectedSummary" class="msg"></p>
+      <div id="rejectedGrid" class="grid rejected-grid" aria-live="polite"></div>
+      <div class="more-wrap">
+        <button id="rejectedMore" class="ghost hidden">加载更多</button>
+      </div>
     </section>
 
     <section id="grid" class="grid" aria-live="polite"></section>

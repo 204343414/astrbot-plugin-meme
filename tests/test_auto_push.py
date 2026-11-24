@@ -645,6 +645,64 @@ def test_failure_classifier_table():
     assert P._classify_auto_failure("") == ""
 
 
+def test_dead_session_message_closes_the_subscription():
+    """「用户/群已注销」也是「这个会话没了」，必须关订阅。
+
+    实测一个已注销的私聊会话每天都被抽中、每次必失败，一周白吃 19 张图的
+    配额；而当时认不出这句措辞，订阅一直没被关掉。
+    """
+    from meme_plugin_under_test.main import MemePlugin as P
+
+    assert P._classify_auto_failure("请求的资源不存在(用户/群已注销)") == "gone"
+    assert P._classify_auto_failure("ServerError: 用户已注销") == "gone"
+
+
+# --- 记账必须在发出去之后（否则发失败也吃配额、还踹到队尾）------------------
+
+def test_failed_push_does_not_mark_the_meme_used(plugin):
+    """发失败了，这张图不能算「这个群看过了」。
+
+    原来记账写在发送之前：一个已注销的私聊会话每天都被抽中、每次都发不出去，
+    但那 19 张图全被记成「刚发过」，used_at 被推到当前时刻踹到队尾 ——
+    群里没人看见，配额还白白吃掉。
+    """
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "low")
+    _make_push_fail(plugin, "ConnectTimeout: 连接超时")
+
+    before = [m.id for m in plugin.store.random_pool()]
+    asyncio.run(plugin._auto_push_one("umo:A", day_key="2026-10-25"))
+
+    # 一张图都没被记成「发过」：全局 used_count 还是 0，本群也没有投递记录
+    assert all(m.used_count == 0 for m in plugin.store.random_pool())
+    assert plugin.store.seen_by("umo:A") == {}
+    assert before  # 池子本身没被动过
+
+
+def test_successful_push_marks_meme_used_for_that_group(plugin):
+    """发成功了才记账，而且记到**这个群**头上。"""
+    _add_meme(plugin, "a")
+    plugin.store.touch_group("umo:A", "G1")
+    plugin.store.set_auto_level("umo:A", "low")
+
+    sent = {}
+
+    async def fake_send(origin, item, **kwargs):
+        sent["origin"] = origin
+        sent["id"] = item.id
+        return True
+
+    plugin._send_item_by_origin = fake_send  # type: ignore[assignment]
+    asyncio.run(plugin._auto_push_one("umo:A", day_key="2026-10-25"))
+
+    assert sent["origin"] == "umo:A"
+    seen = plugin.store.seen_by("umo:A")
+    assert list(seen) == [sent["id"]], "只该记这一张，而且记在本群头上"
+    assert seen[sent["id"]] > 0, "first_at 要有时间戳，靠它判断本群的冷热"
+    # 别的群不受影响
+    assert plugin.store.seen_by("umo:B") == {}
+
+
 # --- 批量铺开低档 -----------------------------------------------------------
 
 def test_bootstrap_opens_low_for_seen_groups(plugin):
@@ -714,3 +772,33 @@ def test_auto_offed_groups_are_listed_for_the_panel(plugin):
     rows = plugin.store.auto_offed_groups()
     assert [r["umo"] for r in rows] == ["umo:A"]
     assert rows[0]["auto_off_reason"] == "gone"
+
+
+# --- 每日额度按群独立（用户的明确要求）--------------------------------------
+
+def test_daily_quota_is_counted_per_group(plugin):
+    """一个群发满 8 条，不能影响别的群今天还能发几条。"""
+    _add_meme(plugin, "a")
+    a, b = "umo:A", "umo:B"
+    for umo in (a, b):
+        plugin.store.touch_group(umo, "G")
+        plugin.store.set_auto_level(umo, "high")
+
+    # A 群发满今天的额度
+    for _ in range(8):
+        assert plugin.store.note_auto_push(a, day_key="2026-10-25") > 0
+
+    assert plugin.store.group_state(a)["auto_sent_count"] == 8
+    # B 群还是 0：额度是按群算的，不是全局共享
+    assert plugin.store.group_state(b)["auto_sent_count"] == 0
+    assert plugin.store.note_auto_push(b, day_key="2026-10-25") == 1
+
+
+def test_daily_quota_resets_on_a_new_day(plugin):
+    plugin.store.touch_group("umo:A", "G")
+    plugin.store.set_auto_level("umo:A", "high")
+    for _ in range(5):
+        plugin.store.note_auto_push("umo:A", day_key="2026-10-25")
+    assert plugin.store.group_state("umo:A")["auto_sent_count"] == 5
+    # 第二天从 1 重新数
+    assert plugin.store.note_auto_push("umo:A", day_key="2026-10-26") == 1
