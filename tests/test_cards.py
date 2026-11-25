@@ -497,3 +497,44 @@ def test_bare_card_without_image_is_never_an_empty_markdown():
     item = MemeItem(id=7, file_path="/tmp/a.jpg", mime="image/jpeg")
     text = build_meme_card(item, "", bare=True)["markdown"]
     assert text.strip() != ""
+
+
+def test_caption_is_not_said_twice_when_the_translation_equals_the_original():
+    """图注不能拼成 `X / X`。
+
+    真机截图上出现过一个图注被连念两遍的卡片（"…给未来游戏主角摆好补给点😂"
+    出现了两次）。成因是 `caption` 与 `caption_zh` 内容相同 —— 模型把原文当
+    译文回、或者这段话本来就是中文不需要翻 —— 而原来的拼接是
+    `" / ".join([caption, caption_zh])`，没有去重。
+
+    顺带一条：`chinese.compose_caption` 早就用 `dict.fromkeys` 去重了，
+    卡片走的是 `MemeItem.caption_line`，同一个坑不该踩两遍。
+    """
+    same = MemeItem(
+        id=1, sha256="x", origin="submitted", file_path="", mime="image/jpeg",
+        caption="古代人一本正经地给未来游戏主角摆好补给点😂",
+        caption_zh="古代人一本正经地给未来游戏主角摆好补给点😂",
+    )
+    line = same.caption_line()
+    assert line.count("补给点") == 1, f"图注被念了两遍：{line!r}"
+    assert line == "古代人一本正经地给未来游戏主角摆好补给点😂"
+
+
+def test_caption_keeps_original_and_translation_when_they_differ():
+    """原文和译文确实不同时，两个都要留（顺序：原文 / 译文）。"""
+    item_ = MemeItem(
+        id=2, sha256="x", origin="submitted", file_path="", mime="image/jpeg",
+        caption="LUG UP LU2 LU2",
+        caption_zh="撸啊撸啊撸啊",
+    )
+    assert item_.caption_line() == "LUG UP LU2 LU2 / 撸啊撸啊撸啊"
+
+
+def test_caption_ignores_whitespace_only_differences():
+    """只差首尾空格也算同一句 —— 别因为一个空格就念两遍。"""
+    item_ = MemeItem(
+        id=3, sha256="x", origin="submitted", file_path="", mime="image/jpeg",
+        caption="  好笑  ",
+        caption_zh="好笑",
+    )
+    assert item_.caption_line() == "好笑"

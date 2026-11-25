@@ -74,6 +74,30 @@ MAX_IMAGES_PER_SUBMIT = 3
 #: QQ 富媒体里的「图片」编号。
 QQ_FILE_TYPE_IMAGE = 1
 
+class SendFailed:
+    """一次发送**真的没出去**，但仍有话要对用户说。
+
+    为什么需要这个类型：`_send_item_by_origin` 有两种"什么都没发出去"的情况 ——
+    抛异常，或者返回一句「这张图现在发不出来（#123）」。而成功时它返回 `None`。
+    调用方光看返回值分不清「这是提示文字」还是「这就是结果对象」，于是出现过
+    最坑的一种：**图没发出去，但记账照做** —— 这张图被标成「本群已看过」推到
+    队尾，群里谁也没看见，而且它再也不会被挑中。
+
+    包一层，让「发失败」成为一个显式的、不可能被当成成功的东西。
+    """
+
+    __slots__ = ("result",)
+
+    def __init__(self, result: Any = None) -> None:
+        self.result = result
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "SendFailed()"
+
+
 #: 卡片素材保留几张。QQ 每个机器人总共 100 张，超了是「新上传被拒」（40035007），
 #: 不会挤掉旧的；删除也不影响已发的消息（平台发消息时已转存副本）。
 #: 所以这里留多少只影响「还能不能继续发新卡片」，跟历史消息无关。
@@ -521,9 +545,12 @@ class MemePlugin(Star):
             return 3
         self._touch_cooldowns(origin, sender)
         try:
-            await self._send_item_by_origin(origin, item, context=context)
+            sent = await self._send_item_by_origin(origin, item, context=context)
         except Exception:  # noqa: BLE001
             logger.warning("[Meme] 按钮「再来一张」发送失败", exc_info=True)
+            return 1
+        if isinstance(sent, SendFailed):
+            logger.warning("[Meme] 按钮「再来一张」没发出去，不记账")
             return 1
         # 发成功才记账：失败的这张不该被算成「这个群已经看过了」。
         await asyncio.to_thread(self.store.mark_used, item.id, origin)
@@ -1305,6 +1332,12 @@ class MemePlugin(Star):
         self._touch_cooldowns(umo, sender)
         result = await self._send_item(event, item)
         # 发成功才记账（见 _auto_push_one 里的说明）。
+        # 这里曾经写成「无条件记账」：图读不出来时 _send_item 返回的是一句
+        # 「发不出来」的提示，而记账照做 —— 这张图于是被标成「本群已看过」
+        # 推到队尾，群里谁也没看到，而且它再也不会被挑中。用户的原话是
+        # 「明明有一百多张，来来回回还是这几张」，起因就是这种静默沉底。
+        if isinstance(result, SendFailed):
+            return result.result
         await asyncio.to_thread(self.store.mark_used, item.id, umo)
         return result
 
@@ -1389,8 +1422,10 @@ class MemePlugin(Star):
             # 自动推送没有 event 可以退：把每一级失败都带上，让上层能判断该不该关订阅
             failures.append(f"图读不出来（#{item.id}）")
             raise RuntimeError("；".join(failures))
-        return event.plain_result(
-            f"这张图现在发不出来（#{item.id}）" + (f"\n{caption}" if caption else "")
+        return SendFailed(
+            event.plain_result(
+                f"这张图现在发不出来（#{item.id}）" + (f"\n{caption}" if caption else "")
+            )
         )
 
     async def _send_image_now(

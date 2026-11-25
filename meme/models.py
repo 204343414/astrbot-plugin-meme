@@ -57,11 +57,16 @@ class MemeItem:
 
         有中文译文就「原文 / 译文」，否则退回原文；都空就是空字符串，
         调用方据此决定要不要发纯图。
+
+        **必须去重**：`caption` 和 `caption_zh` 相同（模型把原文当译文回、
+        或者这段话本来就是中文不需要翻）时会拼成 `X / X`，群友看到的是一句
+        被念了两遍的废话。`chinese.compose_caption` 早就用 `dict.fromkeys`
+        去重了，但卡片走的是这个方法 —— 同一个坑不该踩两遍。
         """
         parts = [p.strip() for p in (self.caption, self.caption_zh) if p and p.strip()]
         if not parts:
             return ""
-        line = " / ".join(parts)
+        line = " / ".join(dict.fromkeys(parts))   # dict 有序，保留原有先后
         if limit and len(line) > limit:
             line = line[: max(0, limit - 1)] + "…"
         return line
