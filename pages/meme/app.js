@@ -100,6 +100,20 @@ async function loadState({ append = false } = {}) {
   if (el("rejectedCount")) {
     el("rejectedCount").textContent = payload.rejected ? String(payload.rejected) : "";
   }
+  if (el("statHosted")) {
+    // 图床覆盖：已搬 / 全库。数不上来说明图床没配或 Hub 太老，显示 —。
+    const hosted = payload.hosted || null;
+    el("statHosted").textContent = hosted
+      ? `${hosted.covered ?? 0}/${hosted.active ?? 0}`
+      : "—";
+    el("statHosted").title = hosted
+      ? `已搬到图床 ${hosted.covered ?? 0} 张，全库 ${hosted.active ?? 0} 张`
+      : "图床未启用";
+    if (el("hostCount")) {
+      const left = hosted ? (hosted.active ?? 0) - (hosted.covered ?? 0) : 0;
+      el("hostCount").textContent = left > 0 ? String(left) : "";
+    }
+  }
   if (el("statAuto")) {
     const auto = payload.auto || {};
     const pcts = auto.pcts || {};
@@ -679,6 +693,8 @@ function bind() {
   });
   on("optSkipReview", "change", pushUploadOptions);
 
+  on("hostLibrary", "click", () => hostLibrary().catch(showError));
+
   on("toggleBans", "click", () => {
     const box = el("bans");
     box.classList.toggle("hidden");
@@ -972,3 +988,38 @@ async function boot() {
 }
 
 boot();
+
+
+/* ---------------- 搬到自建图床 ----------------
+
+ * 为什么是一批一批搬而不是一次搬完：一次请求要读 100 多个文件、算 sha256、
+ * 逐个写盘，面板那条请求会挂在那儿几十秒，看不出是在干活还是卡死。每批 20 张
+ * 就把进度显式打出来，而且中途失败也只丢这一批。
+ *
+ * 只写图床、不改本地文件：`hosted` 表只是多一列 URL，media/ 里的图一张不动，
+ * 所以搬错了随时可以回退（把 prefer_image_host 关掉）。
+ */
+async function hostLibrary() {
+  const button = el("hostLibrary");
+  if (button) button.disabled = true;   // 搬的时候别让人再点一次
+  let moved = 0;
+  let skipped = 0;
+  const failed = [];
+  try {
+    for (let round = 0; round < 50; round += 1) {
+      const result = await apiPost("ui/host_library", { limit: 20 });
+      moved += result.moved || 0;
+      skipped += result.skipped || 0;
+      if (result.failed?.length) failed.push(...result.failed);
+      const left = result.remaining ?? 0;
+      logUpload(`搬到图床：新传 ${moved} 张、复用 ${skipped} 张，还剩 ${left} 张`);
+      // 一张都没动就退出：否则这里会空转 50 圈（比如图床探活过了但每张都写失败）
+      if (left <= 0 || (!result.moved && !result.skipped)) break;
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+  const tail = failed.length ? `，失败 ${failed.length} 张（${failed[0]}）` : "";
+  logUpload(`搬到图床完成：新传 ${moved} 张、复用 ${skipped} 张${tail}`, failed.length > 0);
+  await loadState();
+}

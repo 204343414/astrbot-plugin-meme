@@ -304,6 +304,12 @@ class MemePlugin(Star):
         except (TypeError, ValueError):
             return default
 
+    def _cfg_bool(self, key: str, default: bool = True) -> bool:
+        value = self.cfg.get(key, default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() not in ("", "0", "false", "no", "off")
+
     def _provider(self, provider_id: str):
         provider_id = str(provider_id or "").strip()
         if not provider_id:
@@ -1097,9 +1103,6 @@ class MemePlugin(Star):
                 logger.warning("[Meme] 带图卡片被拒（%s）：%s", url.split("?")[0], exc)
                 return False
 
-        # ① 这张图传过吗？传过就直接用旧的引用 —— 一张图只占一格额度，
-        #    90 天不用的会被平台回收（40035009），那时这张卡会发失败，
-        #    下面会自动退回去重传。
         sha256 = ""
         try:
             from .meme.media import sha256_of
@@ -1107,6 +1110,22 @@ class MemePlugin(Star):
             sha256 = sha256_of(data)
         except Exception:  # noqa: BLE001
             sha256 = ""
+
+        # ① 这张图已经搬到自建图床了吗？搬过就直接用那个公网 URL。
+        #    为什么优先图床：QQ 素材库有 100 张硬上限，塞满之后**所有**带图
+        #    卡片一起发不出去；而图床是我们自己的磁盘，多少张都行。站内已经
+        #    把整库搬过去的图，发一次不该再吃一格配额。
+        #    （腾讯仍会为显示而转存一份，但那是它内部的事，我们这一侧不再受限。）
+        if sha256 and self._cfg_bool("prefer_image_host", True):
+            hosted = await asyncio.to_thread(self.store.hosted_url, sha256)
+            if hosted and await try_card(hosted):
+                return True
+            if hosted:
+                logger.info("[Meme] 图床地址不可用，退回素材库：%s", hosted.split("/")[-1])
+
+        # ② 这张图传过吗？传过就直接用旧的引用 —— 一张图只占一格额度，
+        #    90 天不用的会被平台回收（40035009），那时这张卡会发失败，
+        #    下面会自动退回去重传。
         cached = await asyncio.to_thread(self.store.material_for_sha, sha256) if sha256 else None
         if cached and str(cached.get("url") or ""):
             age = self._cfg_int("card_material_reuse_days", 80) * 86400
@@ -1981,6 +2000,12 @@ class MemePlugin(Star):
             limit=limit,
             offset=offset,
         )
+        # 图床覆盖情况：面板顶栏那个「搬到图床」按钮要知道还剩多少张没搬。
+        # 表不存在时（没建过）不要炸整个页面 —— 只是这一格显示 —。
+        try:
+            page["hosted"] = await asyncio.to_thread(self.store.hosted_stats)
+        except Exception:  # noqa: BLE001
+            page["hosted"] = None
         page["origins"] = build_origin_breakdown(everything.values())
         page["sort"] = sort or SORT_NEW
         page["filters"] = {"origin": origin or "all", "q": query, "status": status or "all"}
@@ -2377,6 +2402,86 @@ class MemePlugin(Star):
             "caption": review.caption_text,
             "parsed": review.parsed,
             "message": ("通过：" if accepted else "不通过（已自动停用）：") + why,
+        }
+
+    # --- 搬图到自建图床（0.6.5）--------------------------------------------
+
+    async def web_host_library(self, *, limit: int = 0) -> dict:
+        """把库里的图搬到自建图床，返回搬了多少。
+
+        为什么值得做：QQ 素材库每机器人只有 100 张、90 天过期、还要靠平台
+        转存；而自建图床是我们自己的磁盘 + 自己的域名，**没有张数上限**。
+        卡片的 markdown 图片只要换成一个公网 URL 就行 —— 图片还是会被腾讯
+        转存进素材库用于显示，但至少「我们这一侧」不再有任何额度约束，
+        而且素材库那 100 格可以专门留给正在用的少数几张。
+
+        ``limit`` > 0 时只搬前 N 张（分批搬，避免一次请求跑太久）。
+        """
+        hub = self._get_hub(quiet=True)
+        host = getattr(hub, "image_host", None) if hub is not None else None
+        if host is None:
+            return {"ok": False, "message": "Hub 没有图床（老版本 Hub？）"}
+        try:
+            if not await hub.image_host_reachable():
+                return {
+                    "ok": False,
+                    "message": f"图床当前不可用：{await hub.image_host_problem()}",
+                }
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "message": f"图床探活失败：{exc}"}
+
+        # 只处理还没搬过的
+        pending = []
+        for item in await asyncio.to_thread(self.store.all_for_hosting):
+            if not await asyncio.to_thread(self.store.hosted_url, item.sha256):
+                pending.append(item)
+        if limit and limit > 0:
+            pending = pending[:limit]
+        if not pending:
+            stats = await asyncio.to_thread(self.store.hosted_stats)
+            return {
+                "ok": True, "moved": 0, "skipped": 0, "failed": [],
+                "remaining": max(0, stats["active"] - stats["covered"]),
+                **stats,
+                "message": "所有图都已经在图床上了",
+            }
+
+        publish = getattr(host, "publish_if_absent", None)
+        moved = skipped = 0
+        failed: list[str] = []
+        for item in pending:
+            try:
+                data = await asyncio.to_thread(self._read_file, item.file_path)
+            except OSError as exc:
+                failed.append(f"#{item.id} 读不到：{exc}")
+                continue
+            try:
+                if publish is not None:
+                    url, created = await asyncio.to_thread(publish, data)
+                else:  # 老 Hub 没有按内容去重的版本
+                    url, created = await asyncio.to_thread(host.publish, data), True
+            except Exception as exc:  # noqa: BLE001
+                failed.append(f"#{item.id} 上传失败：{type(exc).__name__}: {exc}")
+                continue
+            if not url:
+                failed.append(f"#{item.id} 图床没给地址")
+                continue
+            await asyncio.to_thread(self.store.set_hosted_url, item.sha256, url)
+            if created:
+                moved += 1
+            else:
+                skipped += 1
+
+        stats = await asyncio.to_thread(self.store.hosted_stats)
+        logger.info(
+            "[Meme] 搬图到图床：新传 %s 张、复用 %s 张、失败 %s 张（覆盖 %s/%s）",
+            moved, skipped, len(failed), stats["covered"], stats["active"],
+        )
+        return {
+            "ok": True, "moved": moved, "skipped": skipped,
+            "remaining": max(0, stats["active"] - stats["covered"]),
+            "failed": failed[:10],
+            **stats,
         }
 
     # --- 拒收页面（0.6.4）--------------------------------------------------

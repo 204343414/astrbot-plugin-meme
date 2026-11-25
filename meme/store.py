@@ -114,6 +114,19 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS idx_deliveries_meme ON deliveries(meme_id);
 
+-- 图床地址：每张图在自建图床上的公网 URL。
+--
+-- 为什么单独一张表：`file_path` 是本机路径，没法写进卡片；要把图塞进 markdown
+-- 就得有一个公网地址。搬过去之后记在这里，之后每次发卡片直接取，不用重传。
+--
+-- 跟 QQ 素材库是两回事：素材库有 100 张上限且会被平台回收，图床是我们自己的
+-- 磁盘 + 自己的域名，多少张都行。所以能上图床就优先用图床。
+CREATE TABLE IF NOT EXISTS hosted (
+    sha256     TEXT PRIMARY KEY,
+    url        TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+);
+
 -- 恶意投稿黑名单：按「人」拉黑，跨群生效。reason/evidence 都留着，事后能复盘。
 CREATE TABLE IF NOT EXISTS blacklist (
     sender_id     TEXT PRIMARY KEY,
@@ -373,6 +386,37 @@ class MemeStore:
                            times = deliveries.times + 1""",
                     (str(umo), int(meme_id), now, now),
                 )
+
+    # --- 图床地址（自建图床，不受 100 格素材限制）-------------------------
+
+    def hosted_url(self, sha256: str) -> str:
+        rows = self._rows("SELECT url FROM hosted WHERE sha256 = ?", (sha256,))
+        return str(rows[0]["url"] or "") if rows else ""
+
+    def set_hosted_url(self, sha256: str, url: str) -> None:
+        if not sha256 or not url:
+            return
+        self._write(
+            """INSERT INTO hosted (sha256, url, created_at) VALUES (?,?,?)
+               ON CONFLICT(sha256) DO UPDATE SET url = excluded.url,
+                                                 created_at = excluded.created_at""",
+            (sha256, str(url), self.now()),
+        )
+
+    def hosted_stats(self) -> dict:
+        total = int(self._rows("SELECT COUNT(*) AS n FROM hosted")[0]["n"])
+        active = self._rows("SELECT COUNT(*) AS n FROM memes WHERE status = 'active'")[0]["n"]
+        covered = self._rows(
+            """SELECT COUNT(*) AS n FROM memes m
+               JOIN hosted h ON h.sha256 = m.sha256
+               WHERE m.status = 'active'"""
+        )[0]["n"]
+        return {"hosted": total, "active": int(active), "covered": int(covered)}
+
+    def all_for_hosting(self) -> list[MemeItem]:
+        """要搬到图床的图：所有能发的，按入库顺序（先来的先搬）。"""
+        rows = self._rows("SELECT * FROM memes WHERE status = 'active' ORDER BY id")
+        return [MemeItem.from_row(row) for row in rows]
 
     def recent(self, limit: int = 10) -> list[MemeItem]:
         rows = self._rows(

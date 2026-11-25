@@ -11,6 +11,7 @@ FastAPI）。老版本用的是 quart，这里留了一层兼容：拿不到新�
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from astrbot.api import logger
@@ -140,6 +141,8 @@ class MemeWebUI:
             ("rejected_detail", self.rejected_detail, ["GET"], "一张被拒收的图（大图）"),
             ("rejected_accept", self.rejected_accept, ["POST"], "人工接收：直接入库"),
             ("rejected_drop", self.rejected_drop, ["POST"], "丢弃这条拒收记录"),
+            ("host_library", self.host_library, ["POST"], "把库里的图搬到自建图床"),
+            ("host_stats", self.host_stats, ["GET"], "图床覆盖情况"),
         ]
         for name, handler, methods, desc in table:
             route = f"{ROUTE_PREFIX}/{name}"
@@ -319,6 +322,25 @@ class MemeWebUI:
         if result.get("ok"):
             return _ok(result)
         return _error(str(result.get("message") or "丢弃失败"))
+
+    async def host_library(self) -> Any:
+        payload = await _read_json()
+        try:
+            limit = int(payload.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        result = await self.plugin.web_host_library(limit=limit)
+        if result.get("ok"):
+            return _ok(result)
+        return _error(str(result.get("message") or "搬迁失败"), extra=result)
+
+    async def host_stats(self) -> Any:
+        try:
+            stats = await asyncio.to_thread(self.plugin.store.hosted_stats)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Meme] 读取图床统计失败", exc_info=True)
+            return _error(f"读取失败：{type(exc).__name__}: {exc}")
+        return _ok(stats)
 
     async def config_router(self) -> Any:
         if await _current_method() == "POST":
