@@ -66,6 +66,14 @@ class FakeEvent:
     def get_sender_id(self):
         return self._sender_id
 
+    def should_call_llm(self, flag):
+        """AstrBot 的接口：`should_call_llm(False)` 表示**不要**调 LLM。
+
+        名字容易看反 —— 它写的是 `event.call_llm`，而 pipeline 判的是
+        `not event.call_llm`，所以传 False 才是"别让 LLM 再补一句"。
+        """
+        self.call_llm = bool(flag)
+
     def plain_result(self, text):
         self.results.append(("plain", text))
         return ("plain", text)

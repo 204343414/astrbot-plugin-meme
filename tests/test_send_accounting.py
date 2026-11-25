@@ -131,6 +131,14 @@ class _FakeEvent:
         self.message_str = "/meme"
         self.message_obj = None
 
+    def should_call_llm(self, flag):
+        """AstrBot 的接口：`should_call_llm(False)` 表示**不要**调 LLM。
+
+        名字容易看反 —— 它写的是 `event.call_llm`，而 pipeline 判的是
+        `not event.call_llm`，所以传 False 才是"别让 LLM 再补一句"。
+        """
+        self.call_llm = bool(flag)
+
     def plain_result(self, text):
         return text
 
@@ -166,3 +174,47 @@ class _FakeEvent:
 
     def is_private_chat(self):
         return False
+
+
+def test_the_command_tells_astrbot_not_to_call_the_llm(plugin):
+    """`/meme` 必须声明「这条指令不要 LLM 再接一句」。
+
+    不加的后果是真机截图上那句话：
+      「刚才把你单发的 meme 当成是在接着聊，就回了」
+
+    机制在 pipeline/process_stage/stage.py：
+
+        if not event._has_send_oper and event.is_at_or_wake_command and not event.call_llm:
+            if (event.get_result() and not event.is_stopped()) or not event.get_result():
+                async for _ in self.agent_sub_stage.process(event):   # 照样调 LLM
+
+    一个指令 handler 既没 stop_event 也没声明不调 LLM 时，AstrBot 会把它当成
+    闲聊再喂给模型一遍。用 `should_call_llm(False)` 而不是 `stop_event()`：
+    后者会把这轮对话从**历史**里也掐掉，还会拦住排在后面的 handler。
+    """
+    item = seed_one(plugin)
+
+    async def fake_send(event, item_):
+        return None
+
+    plugin._send_item = fake_send
+    event = _FakeEvent()
+    asyncio.run(_drain(plugin.meme_entry(event)))
+
+    assert hasattr(event, "call_llm"), "指令入口应该调用过 should_call_llm"
+    assert event.call_llm is False, (
+        "必须是 False —— AstrBot 判的是 `not event.call_llm`，"
+        "传 True 等于告诉它『照常调 LLM』"
+    )
+
+
+def test_the_command_still_blocks_llm_on_the_failure_path(plugin):
+    """发送失败也要声明 —— 不然模型会对着"发不出来"再补一句废话。"""
+
+    def boom(*a, **k):
+        raise OSError("读不到")
+
+    plugin._read_file = boom
+    event = _FakeEvent()
+    asyncio.run(_drain(plugin.meme_entry(event)))
+    assert event.call_llm is False

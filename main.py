@@ -1224,6 +1224,26 @@ class MemePlugin(Star):
     @filter.command("meme", alias={"梗图", "来张梗图"})
     async def meme_entry(self, event: AstrMessageEvent):
         """随机来一张梗图，或投稿/查库/管理。"""
+        # 指令自己会回复，别让 LLM 再补一句。
+        #
+        # 不加这一行会发生什么（真机截图里就是它）：
+        #   「刚才把你单发的 meme 当成是在接着聊，就回了」
+        # 原因是 pipeline/process_stage/stage.py 的判定 ——
+        #
+        #   if not event._has_send_oper and event.is_at_or_wake_command and not event.call_llm:
+        #       if (event.get_result() and not event.is_stopped()) or not event.get_result():
+        #           async for _ in self.agent_sub_stage.process(event):   # 照样调 LLM
+        #
+        # 也就是说：一个指令 handler **既没 stop_event 也没声明不调 LLM** 时，
+        # AstrBot 会把它当成闲聊再喂给模型一遍。
+        #
+        # 为什么用 should_call_llm 而不是 stop_event：后者会把这轮对话**从历史
+        # 里也掐掉**（`_save_to_history` 被跳过），而且会连带拦住排在后面的
+        # handler。这里要的只是「这条指令不该引发 LLM 再补一句」，别的都照旧。
+        #
+        # 注意这个 API 的语义容易看反：`should_call_llm(False)` = **不要**调 LLM。
+        # 它写进的是 `event.call_llm`，而 stage.py 判的是 `not event.call_llm`。
+        event.should_call_llm(False)
         args = self._args(event)
         sub, _, rest = args.partition(" ")
         sub = sub.strip()

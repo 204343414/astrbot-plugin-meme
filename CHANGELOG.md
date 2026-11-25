@@ -1,5 +1,30 @@
 # 更新记录
 
+## 0.6.8
+
+### 修：`/meme` 会被 LLM 当成闲聊接一句
+
+真机截图里 bot 自己承认了：「刚才把你单发的 meme 当成是在接着聊，就回了」。
+
+机制在 `pipeline/process_stage/stage.py`：
+
+```python
+if not event._has_send_oper and event.is_at_or_wake_command and not event.call_llm:
+    if (event.get_result() and not event.is_stopped()) or not event.get_result():
+        async for _ in self.agent_sub_stage.process(event):   # 照样调 LLM
+```
+
+**一个指令 handler 既没 `stop_event` 也没声明不调 LLM 时，AstrBot 会把它当成
+闲聊再喂给模型一遍。** meme 的 `meme_entry` 两样都没有 —— hub 的 `素材` 命令
+一直有 `stop_event()`，所以那边没这毛病。
+
+- 在 `meme_entry` 开头加 `event.should_call_llm(False)`。
+- **为什么不用 `stop_event()`**：它会把这一轮对话**从历史里也掐掉**
+  （`_save_to_history` 被跳过），还会连带拦住排在后面的 handler。这里要的只是
+  「这条指令不该引发 LLM 再补一句」，别的都照旧。
+- ⚠️ 这个 API 的语义容易看反：`should_call_llm(False)` = **不要**调 LLM。
+  它写的是 `event.call_llm`，而 stage.py 判的是 `not event.call_llm`。
+
 ## 0.6.7
 
 ### 修：图注被念两遍（`X / X`）
