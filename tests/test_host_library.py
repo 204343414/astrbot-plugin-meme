@@ -249,14 +249,10 @@ def test_host_stats_endpoint(env):
 
 # --- 发送时优先用图床 ------------------------------------------------------
 
-def test_send_prefers_the_hosted_url(env):
-    """搬过的图，发卡片时直接写图床 URL，不再去吃素材库配额。"""
-    ids = seed(env, 1)
-    store = env["plugin"].store
-    item = store.get(ids[0])
-    store.set_hosted_url(item.sha256, "https://img.8700k.top/i/abc.jpg")
-
+def _card_sender(env, item, *, material_url="qqbot-media://image/v1/xyz"):
+    """造一个记录「卡片里写了什么图」的假 Hub。"""
     sent: list[str] = []
+    uploads: list[int] = []
 
     class Hub(FakeHub):
         async def send_ephemeral_card(self, origin, card, client=None,
@@ -267,12 +263,57 @@ def test_send_prefers_the_hosted_url(env):
             return True
 
         async def publish_image_material(self, *a, **k):
-            raise AssertionError("已经有图床 URL，不该再去传素材库")
+            uploads.append(1)
+            return {"image_id": "mid-1", "url": material_url, "ttl": 0}
+
+        async def delete_image_material(self, image_id, client=None, origin=""):
+            return True
 
     env["plugin"]._hub = Hub()
+    return sent, uploads
+
+
+def test_send_uses_the_material_store_by_default(env):
+    """默认走素材库，即使这张图早就搬上图床了。
+
+    这是被实机推翻过一次的优先级，别随手改回去：
+
+      a) 平台发 markdown 时会**强制转存**图片，用公网 URL 一样占素材库，
+         而且占的是我们没有 image_id、事后也删不掉的格子（实机 100 张里
+         有 50 张就是这么来的孤儿）；
+      b) Cloudflare 的 Browser Integrity Check（error 1010）会拦腾讯的抓图器，
+         转存直接失败 —— 用户看到的就是「图片转存失败，请重试」。
+
+    素材库这条路我们能拿到 image_id，能记账、能按 card_material_keep 回收。
+    """
+    ids = seed(env, 1)
+    store = env["plugin"].store
+    item = store.get(ids[0])
+    # 这张图「已上图床」的同时，也必须默认走素材库
+    store.set_hosted_url(item.sha256, "https://img.8700k.top/i/abc.jpg")
+    sent, uploads = _card_sender(env, item)
+
     data = open(item.file_path, "rb").read()
-    ok = asyncio.run(
-        env["plugin"]._send_card_item("umo:G", item, data)
-    )
+    ok = asyncio.run(env["plugin"]._send_card_item("umo:G", item, data))
+
     assert ok is True
+    assert uploads, "默认应该传素材库"
+    assert "qqbot-media://" in sent[0]
+    assert "img.8700k.top" not in sent[0]
+
+
+def test_send_can_be_told_to_prefer_the_hosted_url(env):
+    """显式打开 prefer_image_host 时，搬过的图直接用图床 URL。"""
+    env["plugin"].cfg["prefer_image_host"] = True
+    ids = seed(env, 1)
+    store = env["plugin"].store
+    item = store.get(ids[0])
+    store.set_hosted_url(item.sha256, "https://img.8700k.top/i/abc.jpg")
+    sent, uploads = _card_sender(env, item)
+
+    data = open(item.file_path, "rb").read()
+    ok = asyncio.run(env["plugin"]._send_card_item("umo:G", item, data))
+
+    assert ok is True
+    assert not uploads, "开了开关就不该再占素材库"
     assert "https://img.8700k.top/i/abc.jpg" in sent[0]

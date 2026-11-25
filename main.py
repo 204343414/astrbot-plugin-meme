@@ -77,7 +77,12 @@ QQ_FILE_TYPE_IMAGE = 1
 #: 卡片素材保留几张。QQ 每个机器人总共 100 张，超了是「新上传被拒」（40035007），
 #: 不会挤掉旧的；删除也不影响已发的消息（平台发消息时已转存副本）。
 #: 所以这里留多少只影响「还能不能继续发新卡片」，跟历史消息无关。
-CARD_MATERIAL_KEEP = 60
+#:
+#: 为什么从 60 降到 40：100 格里有一半会被**平台转存的孤儿**吃掉（发 markdown
+#: 时强制转存，那些副本没有 image_id、我们回收不了）。实机就是这么满的。
+#: 留给自己的那一半还得留余量，否则「我们自己没超，但库已经满了」，症状是
+#: 连一张新卡片都发不出去。
+CARD_MATERIAL_KEEP = 40
 CARD_MATERIAL_KEEP_MAX = 90
 #: 收到「主动消息无权限」后，这个群多久之内不再试。
 PUSH_BLOCK_SECONDS = 24 * 3600
@@ -1111,12 +1116,22 @@ class MemePlugin(Star):
         except Exception:  # noqa: BLE001
             sha256 = ""
 
-        # ① 这张图已经搬到自建图床了吗？搬过就直接用那个公网 URL。
-        #    为什么优先图床：QQ 素材库有 100 张硬上限，塞满之后**所有**带图
-        #    卡片一起发不出去；而图床是我们自己的磁盘，多少张都行。站内已经
-        #    把整库搬过去的图，发一次不该再吃一格配额。
-        #    （腾讯仍会为显示而转存一份，但那是它内部的事，我们这一侧不再受限。）
-        if sha256 and self._cfg_bool("prefer_image_host", True):
+        # ① 想先走图床公网 URL 吗？**默认不走**，理由见下（实测推翻了原来的假设）。
+        #
+        # 原来的想法：图床是我们自己的磁盘、没有张数上限，所以先走公网 URL，
+        # 让素材库那 100 格空着。实机结果是错的，两条都错：
+        #
+        #   a) 平台发 markdown 消息时会**强制转存**图片（`force_verify_image_
+        #      resource`）。用公网 URL 不但照样占素材库，而且占的是**我们
+        #      没有 image_id、事后也删不掉**的格子 —— 素材库里 100 张有 50 张
+        #      就是这么来的孤儿，越发越满、谁也回收不了。
+        #   b) Cloudflare 的 Browser Integrity Check（error 1010）会拦掉
+        #      "非标准 User-Agent"，腾讯那边的抓图器正好中招，于是转存直接失败。
+        #
+        # 所以顺序反过来：**素材库优先**（我们自己拿到 image_id，能记账、能按
+        # 配置回收），图床 URL 只在素材库不可用时兜底。想让公网 URL 优先，
+        # 显式把 prefer_image_host 打开。
+        if sha256 and self._cfg_bool("prefer_image_host", False):
             hosted = await asyncio.to_thread(self.store.hosted_url, sha256)
             if hosted and await try_card(hosted):
                 return True
