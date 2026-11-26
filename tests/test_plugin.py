@@ -265,6 +265,14 @@ def test_submission_stores_the_image(plugin, monkeypatch):
     chunks = run(collect(plugin._do_submit(event, plugin._event_images(event))))
     assert "已入库" in chunks[0][1]
     assert plugin.store.stats()["total"] == 1
+    # 「已入库」只能出现一次。
+    #
+    # 原来这句是 `f"#{id} {tag}：{outcome.reason}"`，而 reason 本身就是
+    # 「已入库」，于是真机回执是「#128 已入库：已入库」。在 QQ 上 `#` 被
+    # markdown 标题吃掉，用户看到的是「128 已入库： 已入库128 已入库： 已入库」，
+    # 一眼就以为是插件在重复发言。这条断言就是钉住它别再回来。
+    assert chunks[0][1].count("已入库") == 1, chunks[0][1]
+    assert "：" not in chunks[0][1], chunks[0][1]
 
 
 def test_submission_without_image_explains_how(plugin):

@@ -1526,7 +1526,24 @@ class MemePlugin(Star):
                 accepted += 1
                 tag = "重画成中文版" if outcome.redrawn else "已入库"
                 dup = "（早就有了）" if outcome.duplicate else ""
-                lines.append(f"#{outcome.meme.id} {tag}{dup}：{outcome.reason}")
+                # 回执别把同一个词印两遍。
+                #
+                # 这里原来写的是 `f"#{id} {tag}{dup}：{outcome.reason}"`，而
+                # `outcome.reason` 在成功分支里**本身就是**「已入库」或
+                # 「重画成中文版后入库」（见 meme/pipeline.py 的 IngestResult），
+                # 于是真机回执长这样：
+                #
+                #   #128 已入库：已入库
+                #
+                # 在 QQ 上更难看：`#` 开头会被 markdown 当成标题吃掉，用户那边
+                # 看到的是「128 已入库： 已入库128 已入库： 已入库」——同一条
+                # 消息里像被拼了两遍。用户第一反应必然是「插件在重复发言」，
+                # 而真正的问题只是文案自带了主语。
+                detail = str(outcome.reason or "").strip()
+                if detail in {"已入库", "重画成中文版后入库"} or not detail:
+                    detail = ""
+                head = f"#{outcome.meme.id} {tag}{dup}"
+                lines.append(f"{head}：{detail}" if detail else head)
             else:
                 lines.append(f"没收：{outcome.reason}")
             if outcome.banned:
